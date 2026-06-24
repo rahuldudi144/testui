@@ -1,0 +1,21 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: db-agent-testui-postgres
+    restart: unless-stopped
+    ports:
+      - "5555:5432"
+    environment:
+      POSTGRES_USER: testui
+      POSTGRES_PASSWORD: testui
+      POSTGRES_DB: testui
+    volumes:
+      - testui_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U testui -d testui"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  testui_postgres_data:

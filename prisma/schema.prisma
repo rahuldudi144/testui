@@ -1,0 +1,93 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model User {
+  id               String               @id @default(cuid())
+  username         String               @unique
+  passwordHash     String
+  createdAt        DateTime             @default(now())
+  activeDatabaseId String?
+  activeDatabase   DatabaseConnection?  @relation("ActiveDatabase", fields: [activeDatabaseId], references: [id], onDelete: SetNull)
+  conversations    Conversation[]
+  databases        DatabaseConnection[] @relation("UserDatabases")
+  workflowTests    WorkflowTest[]
+  workflowTestRuns WorkflowTestRun[]
+}
+
+model DatabaseConnection {
+  id              String   @id @default(cuid())
+  userId          String
+  user            User     @relation("UserDatabases", fields: [userId], references: [id], onDelete: Cascade)
+  activeForUsers  User[]   @relation("ActiveDatabase")
+  name            String
+  dbType          String
+  dbUri           String   @db.Text
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([userId])
+}
+
+model Conversation {
+  id        String    @id @default(cuid())
+  userId    String
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  title     String?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  messages  Message[]
+
+  @@index([userId])
+}
+
+model Message {
+  id             String       @id @default(cuid())
+  conversationId String
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  role           String
+  content        String       @db.Text
+  generatedSql   String?      @db.Text
+  debugData      Json?
+  createdAt      DateTime     @default(now())
+
+  @@index([conversationId])
+}
+
+model WorkflowTest {
+  id        String            @id @default(cuid())
+  userId    String
+  user      User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name      String
+  dryRun    Boolean           @default(false)
+  delayMs   Int               @default(0)
+  groups    Json
+  createdAt DateTime          @default(now())
+  updatedAt DateTime          @updatedAt
+  runs      WorkflowTestRun[]
+
+  @@unique([userId, name])
+  @@index([userId, updatedAt(sort: Desc)])
+}
+
+model WorkflowTestRun {
+  id             String        @id @default(cuid())
+  userId         String
+  user           User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  workflowTestId String
+  workflowTest   WorkflowTest  @relation(fields: [workflowTestId], references: [id], onDelete: Cascade)
+  testName       String
+  dryRun         Boolean
+  delayMs        Int
+  database       Json
+  summary        Json
+  results        Json
+  ranAt          DateTime      @default(now())
+
+  @@index([userId, ranAt(sort: Desc)])
+  @@index([workflowTestId, ranAt(sort: Desc)])
+}
