@@ -1,5 +1,8 @@
 import type { DatabaseType } from "../../types/index.js";
 import { prisma } from "./db.js";
+import { countTables } from "./syncConnectionSchema.js";
+
+export type SchemaSyncStatus = "idle" | "syncing" | "ready" | "failed";
 
 export interface UserDatabase {
   id: string;
@@ -7,8 +10,14 @@ export interface UserDatabase {
   dbType: DatabaseType;
   dbUri: string;
   host: string;
-  createdAt: Date;
-  updatedAt: Date;
+  businessContext: string | null;
+  schemaSyncStatus: SchemaSyncStatus;
+  schemaSyncedAt: string | null;
+  schemaSyncError: string | null;
+  schemaTableCount: number;
+  hasBusinessContext: boolean;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export function parseDbHost(dbUri: string): string {
@@ -26,17 +35,29 @@ export function toPublicDatabase(row: {
   name: string;
   dbType: string;
   dbUri: string;
+  businessContext?: string | null;
+  dbMetadata?: unknown;
+  schemaSyncStatus?: string;
+  schemaSyncedAt?: Date | null;
+  schemaSyncError?: string | null;
   createdAt: Date;
   updatedAt: Date;
 }): UserDatabase {
+  const businessContext = row.businessContext ?? null;
   return {
     id: row.id,
     name: row.name,
     dbType: row.dbType as DatabaseType,
     dbUri: row.dbUri,
     host: parseDbHost(row.dbUri),
-    createdAt: row.createdAt,
-    updatedAt: row.updatedAt,
+    businessContext,
+    schemaSyncStatus: (row.schemaSyncStatus ?? "idle") as SchemaSyncStatus,
+    schemaSyncedAt: row.schemaSyncedAt?.toISOString() ?? null,
+    schemaSyncError: row.schemaSyncError ?? null,
+    schemaTableCount: countTables(row.dbMetadata),
+    hasBusinessContext: Boolean(businessContext?.trim()),
+    createdAt: row.createdAt.toISOString(),
+    updatedAt: row.updatedAt.toISOString(),
   };
 }
 
@@ -71,4 +92,18 @@ export async function setActiveDatabase(userId: string, databaseId: string) {
 
 export function validateDbType(dbType: string): dbType is DatabaseType {
   return dbType === "postgres" || dbType === "mysql";
+}
+
+export function connectionAgentMetadata(connection: {
+  businessContext?: string | null;
+  dbMetadata?: unknown;
+}): {
+  businessContext?: string;
+  dbMetadata?: unknown;
+} {
+  const businessContext = connection.businessContext?.trim();
+  return {
+    businessContext: businessContext || undefined,
+    dbMetadata: connection.dbMetadata ?? undefined,
+  };
 }

@@ -86,15 +86,44 @@ export function TopBar({
 export function DbSubtitle({
   name,
   dbType,
+  schemaSyncStatus,
+  schemaTableCount,
+  hasBusinessContext,
+  activeAgentName,
+  agentHasSystemPrompt,
   onConfigure,
 }: {
   name?: string;
   dbType?: string;
+  schemaSyncStatus?: "idle" | "syncing" | "ready" | "failed";
+  schemaTableCount?: number;
+  hasBusinessContext?: boolean;
+  activeAgentName?: string;
+  agentHasSystemPrompt?: boolean;
   onConfigure?: () => void;
 }) {
   if (name && dbType) {
+    const metaParts: string[] = [];
+    if (schemaSyncStatus === "ready" && (schemaTableCount ?? 0) > 0) {
+      metaParts.push(`${schemaTableCount} tables`);
+    } else if (schemaSyncStatus === "syncing") {
+      metaParts.push("syncing schema");
+    } else if (schemaSyncStatus === "failed") {
+      metaParts.push("schema sync failed");
+    }
+    if (hasBusinessContext) {
+      metaParts.push("context set");
+    }
+    if (activeAgentName) {
+      metaParts.push(
+        agentHasSystemPrompt
+          ? `agent: ${activeAgentName}`
+          : `agent: ${activeAgentName} (default prompt)`,
+      );
+    }
+
     return (
-      <span className="inline-flex min-w-0 max-w-full items-center gap-2">
+      <span className="inline-flex min-w-0 max-w-full flex-wrap items-center gap-x-2 gap-y-0.5">
         <span className="truncate">
           {name} ({dbType})
         </span>
@@ -108,6 +137,11 @@ export function DbSubtitle({
           />
           <span className="text-[10px] font-medium uppercase tracking-wide">Live</span>
         </span>
+        {metaParts.length > 0 && (
+          <span className="text-[10px] text-muted-foreground">
+            · {metaParts.join(" · ")}
+          </span>
+        )}
       </span>
     );
   }

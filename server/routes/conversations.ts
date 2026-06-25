@@ -16,7 +16,9 @@ import {
   streamAgentEvents,
 } from "../runAgentWithHistory.js";
 import { isPublicStreamEvent } from "../streamEventFilter.js";
-import { getActiveDatabaseForUser, parseDbHost } from "../userDatabase.js";
+import { getActiveDatabaseForUser, parseDbHost, connectionAgentMetadata } from "../userDatabase.js";
+import { getActiveAgentForUser, profileAgentConfig } from "../userAgent.js";
+import { countTables } from "../syncConnectionSchema.js";
 import { authMiddleware } from "./auth.js";
 
 type AuthUser = { id: string; username: string; createdAt: Date };
@@ -145,9 +147,6 @@ conversationRoutes.post("/:id/messages", async (c) => {
     streamEvents?: boolean;
     debug?: boolean;
     businessContext?: string;
-    llmProvider?: "openai" | "ollama";
-    modelName?: string;
-    ollamaBaseUrl?: string;
   }>();
   const query = body.query?.trim();
   const dryRun = body.dryRun ?? false;
@@ -184,6 +183,9 @@ conversationRoutes.post("/:id/messages", async (c) => {
     );
   }
 
+  const activeAgent = await getActiveAgentForUser(user.id);
+  const runnerOptions = profileAgentConfig(activeAgent);
+
   const messages = toAgentMessages(priorRows);
   const dbType = activeDb.dbType as "postgres" | "mysql";
   const { requestId, correlationId } = createAgentRequestIds(conversationId);
@@ -196,8 +198,8 @@ conversationRoutes.post("/:id/messages", async (c) => {
   };
 
   const env = loadEnv();
-  const effectiveProvider = body.llmProvider ?? env.DB_AGENT_LLM_PROVIDER;
-  const effectiveModel = body.modelName ?? env.DB_AGENT_MODEL_NAME;
+  const effectiveProvider = runnerOptions.llmProvider ?? env.DB_AGENT_LLM_PROVIDER;
+  const effectiveModel = runnerOptions.modelName ?? env.DB_AGENT_MODEL_NAME;
   const agentConfig = {
     provider: effectiveProvider,
     model: effectiveModel,
@@ -206,10 +208,7 @@ conversationRoutes.post("/:id/messages", async (c) => {
   };
 
   const agentInputBase = {
-    businessContext: body.businessContext?.trim() || undefined,
-    llmProvider: body.llmProvider,
-    modelName: body.modelName,
-    ollamaBaseUrl: body.ollamaBaseUrl,
+    ...connectionAgentMetadata(activeDb),
   };
 
   if (!streamEvents && dryRun) {
@@ -233,6 +232,7 @@ conversationRoutes.post("/:id/messages", async (c) => {
             correlationId,
             ...agentInputBase,
           },
+          runnerOptions,
         );
 
         await stream.writeSSE({
@@ -256,7 +256,14 @@ conversationRoutes.post("/:id/messages", async (c) => {
         const debug = buildFullDebugPayload(
           requestId,
           correlationId,
-          dbInfo,
+          {
+            ...dbInfo,
+            schemaTableCount: activeDb.dbMetadata
+              ? countTables(activeDb.dbMetadata)
+              : 0,
+            metadataSource: activeDb.dbMetadata ? "stored" : "live",
+            hasBusinessContext: Boolean(activeDb.businessContext?.trim()),
+          },
           runContext,
           { generatedSql, stateHistory },
         );
@@ -322,6 +329,11 @@ conversationRoutes.post("/:id/messages", async (c) => {
 
       let stateHistory: StateHistoryEntry[] = [];
       let generatedSqlFromStream: string | undefined;
+      let tokenTotals: {
+        totalPromptTokens?: number;
+        totalCompletionTokens?: number;
+        totalTokens?: number;
+      } = {};
 
       for await (const event of streamAgentEvents(dbType, activeDb.dbUri, {
         query,
@@ -330,7 +342,7 @@ conversationRoutes.post("/:id/messages", async (c) => {
         requestId,
         correlationId,
         ...agentInputBase,
-      })) {
+      }, runnerOptions)) {
         collectedEvents.push(event as Record<string, unknown>);
 
         if (isPublicStreamEvent(event, streamDebug)) {
@@ -348,6 +360,11 @@ conversationRoutes.post("/:id/messages", async (c) => {
         }
         if (event.type === "done" && event.stateHistory) {
           stateHistory = event.stateHistory;
+          tokenTotals = {
+            totalPromptTokens: event.totalPromptTokens,
+            totalCompletionTokens: event.totalCompletionTokens,
+            totalTokens: event.totalTokens,
+          };
         }
         if (event.type === "error") {
           await stream.writeSSE({
@@ -379,9 +396,16 @@ conversationRoutes.post("/:id/messages", async (c) => {
       const debugPayload = buildFullDebugPayload(
         requestId,
         correlationId,
-        dbInfo,
+        {
+          ...dbInfo,
+          schemaTableCount: activeDb.dbMetadata
+            ? countTables(activeDb.dbMetadata)
+            : 0,
+          metadataSource: activeDb.dbMetadata ? "stored" : "live",
+          hasBusinessContext: Boolean(activeDb.businessContext?.trim()),
+        },
         runContext,
-        { generatedSql, stateHistory, streamEvents: collectedEvents },
+        { generatedSql, stateHistory, streamEvents: collectedEvents, ...tokenTotals },
       );
 
       await prisma.message.create({
@@ -412,6 +436,7 @@ conversationRoutes.post("/:id/messages", async (c) => {
           correlationId,
           generatedSql,
           debug: debugPayload,
+          ...tokenTotals,
         }),
       });
     } catch (error) {

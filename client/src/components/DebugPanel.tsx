@@ -345,6 +345,26 @@ export function DebugPanel({
                   <p className="mt-1 font-mono text-[11px] text-muted-foreground">
                     {String(database.host ?? "—")}
                   </p>
+                  <div className="mt-2 grid grid-cols-2 gap-2">
+                    {database.metadataSource !== undefined && (
+                      <StatCard
+                        label="Schema source"
+                        value={String(database.metadataSource)}
+                      />
+                    )}
+                    {database.schemaTableCount !== undefined && (
+                      <StatCard
+                        label="Stored tables"
+                        value={String(database.schemaTableCount)}
+                      />
+                    )}
+                    {database.hasBusinessContext !== undefined && (
+                      <StatCard
+                        label="Business context"
+                        value={database.hasBusinessContext ? "Set" : "None"}
+                      />
+                    )}
+                  </div>
                 </div>
               </Section>
             )}
@@ -541,6 +561,12 @@ export function DebugPanel({
                     label="Completion tokens"
                     value={String(totals.totalCompletionTokens ?? 0)}
                   />
+                  {totals.totalTokens !== undefined && (
+                    <StatCard
+                      label="Total tokens"
+                      value={String(totals.totalTokens)}
+                    />
+                  )}
                   <StatCard
                     label="LLM latency"
                     value={`${String(totals.totalLlmLatencyMs ?? 0)} ms`}

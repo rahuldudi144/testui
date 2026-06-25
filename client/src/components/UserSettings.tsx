@@ -135,7 +135,7 @@ export function UserSettings({ currentUser }: Props) {
   }
 
   return (
-    <div className="space-y-6">
+    <div className="w-full space-y-6">
       <div>
         <h2 className="text-lg font-semibold tracking-tight">User management</h2>
         <p className="mt-1 text-sm text-muted-foreground">
@@ -175,61 +175,6 @@ export function UserSettings({ currentUser }: Props) {
               </dd>
             </div>
           </dl>
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardHeader>
-          <CardTitle>Change password</CardTitle>
-          <CardDescription>Update your account password</CardDescription>
-        </CardHeader>
-        <CardContent>
-          <form onSubmit={handleChangePassword} className="grid max-w-md gap-4">
-            <FormField>
-              <Label htmlFor="current-password">Current password</Label>
-              <Input
-                id="current-password"
-                type="password"
-                value={currentPassword}
-                onChange={(e) => setCurrentPassword(e.target.value)}
-                autoComplete="current-password"
-                required
-              />
-            </FormField>
-            <FormField>
-              <Label htmlFor="new-password">New password</Label>
-              <Input
-                id="new-password"
-                type="password"
-                value={password}
-                onChange={(e) => {
-                  setPassword(e.target.value);
-                  setPasswordMismatch(false);
-                }}
-                autoComplete="new-password"
-                required
-              />
-            </FormField>
-            <FormField>
-              <Label htmlFor="confirm-password">Confirm new password</Label>
-              <Input
-                id="confirm-password"
-                type="password"
-                value={confirmPassword}
-                onChange={(e) => {
-                  setConfirmPassword(e.target.value);
-                  setPasswordMismatch(false);
-                }}
-                autoComplete="new-password"
-                error={passwordMismatch}
-                required
-              />
-              <FormError message={passwordMismatch ? "Passwords do not match." : null} />
-            </FormField>
-            <Button type="submit" loading={changingPassword}>
-              Update password
-            </Button>
-          </form>
         </CardContent>
       </Card>
 
@@ -295,13 +240,69 @@ export function UserSettings({ currentUser }: Props) {
         </CardContent>
       </Card>
 
-      <Card>
-        <CardHeader>
-          <CardTitle>Add user</CardTitle>
-          <CardDescription>Create a new test account</CardDescription>
-        </CardHeader>
-        <CardContent>
-          <form onSubmit={handleCreateUser} className="grid max-w-md gap-4">
+      <div className="grid w-full gap-6 lg:grid-cols-2 lg:items-start">
+        <Card>
+          <CardHeader>
+            <CardTitle>Change password</CardTitle>
+            <CardDescription>Update your account password</CardDescription>
+          </CardHeader>
+          <CardContent>
+            <form onSubmit={handleChangePassword} className="grid w-full gap-4">
+            <FormField>
+              <Label htmlFor="current-password">Current password</Label>
+              <Input
+                id="current-password"
+                type="password"
+                value={currentPassword}
+                onChange={(e) => setCurrentPassword(e.target.value)}
+                autoComplete="current-password"
+                required
+              />
+            </FormField>
+            <FormField>
+              <Label htmlFor="new-password">New password</Label>
+              <Input
+                id="new-password"
+                type="password"
+                value={password}
+                onChange={(e) => {
+                  setPassword(e.target.value);
+                  setPasswordMismatch(false);
+                }}
+                autoComplete="new-password"
+                required
+              />
+            </FormField>
+            <FormField>
+              <Label htmlFor="confirm-password">Confirm new password</Label>
+              <Input
+                id="confirm-password"
+                type="password"
+                value={confirmPassword}
+                onChange={(e) => {
+                  setConfirmPassword(e.target.value);
+                  setPasswordMismatch(false);
+                }}
+                autoComplete="new-password"
+                error={passwordMismatch}
+                required
+              />
+              <FormError message={passwordMismatch ? "Passwords do not match." : null} />
+            </FormField>
+            <Button type="submit" loading={changingPassword}>
+              Update password
+            </Button>
+          </form>
+        </CardContent>
+      </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle>Add user</CardTitle>
+            <CardDescription>Create a new test account</CardDescription>
+          </CardHeader>
+          <CardContent>
+            <form onSubmit={handleCreateUser} className="grid w-full gap-4">
             <FormField>
               <Label htmlFor="new-email">Email</Label>
               <Input
@@ -331,6 +332,7 @@ export function UserSettings({ currentUser }: Props) {
           </form>
         </CardContent>
       </Card>
+      </div>
 
       <ConfirmDialog
         open={!!deleteTarget}

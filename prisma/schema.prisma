@@ -13,22 +13,47 @@ model User {
   createdAt        DateTime             @default(now())
   activeDatabaseId String?
   activeDatabase   DatabaseConnection?  @relation("ActiveDatabase", fields: [activeDatabaseId], references: [id], onDelete: SetNull)
+  activeAgentId    String?
+  activeAgent      AgentProfile?        @relation("ActiveAgent", fields: [activeAgentId], references: [id], onDelete: SetNull)
   conversations    Conversation[]
   databases        DatabaseConnection[] @relation("UserDatabases")
+  agents           AgentProfile[]       @relation("UserAgents")
   workflowTests    WorkflowTest[]
   workflowTestRuns WorkflowTestRun[]
 }
 
+model AgentProfile {
+  id             String   @id @default(cuid())
+  userId         String
+  user           User     @relation("UserAgents", fields: [userId], references: [id], onDelete: Cascade)
+  activeForUsers User[]   @relation("ActiveAgent")
+  name           String
+  systemPrompt   String?  @db.Text
+  llmProvider    String?
+  modelName      String?
+  apiKey         String?  @db.Text
+  baseUrl        String?  @db.Text
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@index([userId])
+}
+
 model DatabaseConnection {
-  id              String   @id @default(cuid())
-  userId          String
-  user            User     @relation("UserDatabases", fields: [userId], references: [id], onDelete: Cascade)
-  activeForUsers  User[]   @relation("ActiveDatabase")
-  name            String
-  dbType          String
-  dbUri           String   @db.Text
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
+  id               String    @id @default(cuid())
+  userId           String
+  user             User      @relation("UserDatabases", fields: [userId], references: [id], onDelete: Cascade)
+  activeForUsers   User[]    @relation("ActiveDatabase")
+  name             String
+  dbType           String
+  dbUri            String    @db.Text
+  businessContext  String?   @db.Text
+  dbMetadata       Json?
+  schemaSyncedAt   DateTime?
+  schemaSyncStatus String    @default("idle")
+  schemaSyncError  String?   @db.Text
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
 
   @@index([userId])
 }

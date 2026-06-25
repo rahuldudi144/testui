@@ -40,6 +40,7 @@ import { AgentError, errorMessage } from "../../utils/errors.js";
 import { resolveSystemPrompt } from "../../utils/resolveSystemPrompt.js";
 import { extractText } from "../../nodes/shared.js";
 import { buildConfig, createAgent } from "./agent.js";
+import type { AgentConfigOverrides } from "./agent.js";
 import type { AgentEvent } from "../../types/events.js";
 import {
   getRequestDebugSnapshot,
@@ -51,6 +52,8 @@ import {
 } from "./logStreamEvents.js";
 
 const graph: CompiledAgentGraph = buildGraph();
+
+type RunnerOptions = AgentConfigOverrides;
 
 class AgentRunner {
   private readonly config: DatabaseAgentConfig;
@@ -285,24 +288,30 @@ class AgentRunner {
   }
 }
 
-function createRunner(dbType: DatabaseType, dbUri: string): AgentRunner {
-  return new AgentRunner(buildConfig(dbType), dbUri);
+function createRunner(
+  dbType: DatabaseType,
+  dbUri: string,
+  options?: RunnerOptions,
+): AgentRunner {
+  return new AgentRunner(buildConfig(dbType, options), dbUri);
 }
 
 export async function invokeWithHistory(
   dbType: DatabaseType,
   dbUri: string,
   input: InvokeInput,
+  runnerOptions?: RunnerOptions,
 ): Promise<{ result: InvokeResult; stateHistory: StateHistoryEntry[] }> {
-  return createRunner(dbType, dbUri).invoke(input);
+  return createRunner(dbType, dbUri, runnerOptions).invoke(input);
 }
 
 export function streamWithHistory(
   dbType: DatabaseType,
   dbUri: string,
   input: InvokeInput,
+  runnerOptions?: RunnerOptions,
 ): AsyncGenerator<string, StateHistoryEntry[]> {
-  return createRunner(dbType, dbUri).stream(input);
+  return createRunner(dbType, dbUri, runnerOptions).stream(input);
 }
 
 /** Stream typed AgentEvents via DatabaseAgent (streamEvents + debug enabled). */
@@ -310,6 +319,7 @@ export async function* streamAgentEvents(
   dbType: DatabaseType,
   dbUri: string,
   input: Omit<InvokeInput, "streamEvents" | "debug">,
+  runnerOptions?: RunnerOptions,
 ): AsyncGenerator<AgentEvent> {
   const requestId = input.requestId;
   if (!requestId) {
@@ -319,7 +329,7 @@ export async function* streamAgentEvents(
     );
   }
 
-  const agent = createAgent(dbType, dbUri);
+  const agent = createAgent(dbType, dbUri, runnerOptions);
   const logContext = createLogStreamContext();
   const pending: AgentEvent[] = [];
   let logCursor = 0;

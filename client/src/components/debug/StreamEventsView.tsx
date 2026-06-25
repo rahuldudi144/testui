@@ -29,6 +29,8 @@ function eventBadgeVariant(
       return "default";
     case "token":
       return "outline";
+    case "llm_usage":
+      return "info";
     default:
       return "outline";
   }
@@ -49,14 +51,25 @@ function formatEventSummary(event: AgentEvent): string {
       return `${event.sql.length} chars`;
     case "token":
       return `${event.content.length} chars`;
+    case "llm_usage": {
+      const parts: string[] = [nodeStreamLabel(event.node as GraphNodeName)];
+      if (event.promptTokens !== undefined) parts.push(`${event.promptTokens} prompt`);
+      if (event.completionTokens !== undefined) {
+        parts.push(`${event.completionTokens} completion`);
+      }
+      return parts.join(" · ");
+    }
     case "status":
       return event.message;
     case "debug":
       return event.name;
     case "error":
       return event.message;
-    case "done":
-      return "stream finished";
+    case "done": {
+      const parts = ["stream finished"];
+      if (event.totalTokens !== undefined) parts.push(`${event.totalTokens} total tokens`);
+      return parts.join(" · ");
+    }
     default:
       return "";
   }
@@ -100,6 +113,38 @@ function EventDetail({ event }: { event: AgentEvent }) {
       </p>
     );
   }
+  if (event.type === "llm_usage") {
+    return (
+      <div className="mt-1 space-y-0.5 text-[11px] text-muted-foreground">
+        <p>
+          {event.provider} / {event.model}
+        </p>
+        {event.promptTokens !== undefined && <p>Prompt tokens: {event.promptTokens}</p>}
+        {event.completionTokens !== undefined && (
+          <p>Completion tokens: {event.completionTokens}</p>
+        )}
+        {event.totalTokens !== undefined && <p>Total tokens: {event.totalTokens}</p>}
+      </div>
+    );
+  }
+  if (event.type === "done") {
+    const hasTotals =
+      event.totalPromptTokens !== undefined ||
+      event.totalCompletionTokens !== undefined ||
+      event.totalTokens !== undefined;
+    if (!hasTotals) return null;
+    return (
+      <div className="mt-1 space-y-0.5 text-[11px] text-muted-foreground">
+        {event.totalPromptTokens !== undefined && (
+          <p>Total prompt tokens: {event.totalPromptTokens}</p>
+        )}
+        {event.totalCompletionTokens !== undefined && (
+          <p>Total completion tokens: {event.totalCompletionTokens}</p>
+        )}
+        {event.totalTokens !== undefined && <p>Total tokens: {event.totalTokens}</p>}
+      </div>
+    );
+  }
   return null;
 }
 
@@ -109,7 +154,9 @@ function hasExpandableDetail(event: AgentEvent): boolean {
     event.type === "validation_failed" ||
     event.type === "token" ||
     event.type === "debug" ||
-    event.type === "node_complete"
+    event.type === "node_complete" ||
+    event.type === "llm_usage" ||
+    event.type === "done"
   );
 }
 

@@ -6,12 +6,14 @@ import {
   fetchMe,
   listConversations,
   listDatabases,
+  listAgents,
   login,
   logout,
   sendMessage,
   type ChatMessage,
   type Conversation,
   type User,
+  type UserAgent,
   type UserDatabase,
 } from "./api";
 import type { AgentEvent } from "./types/agentEvents";
@@ -35,7 +37,6 @@ import { Alert } from "./components/ui/Alert";
 import { Button } from "./components/ui/Button";
 import { EmptyState } from "./components/ui/EmptyState";
 import { useIsDesktop, useIsTabletUp } from "./lib/useMediaQuery";
-import { loadAgentRequestOptions } from "./lib/agentRequestOptions";
 import { MessageSquarePlus } from "lucide-react";
 
 type AppView = "chat" | "settings" | "workflowTest";
@@ -61,6 +62,7 @@ export default function App() {
   const [activeDatabase, setActiveDatabase] = useState<UserDatabase | null>(
     null,
   );
+  const [activeAgent, setActiveAgent] = useState<UserAgent | null>(null);
   const [lastDebug, setLastDebug] = useState<Record<string, unknown> | null>(
     null,
   );
@@ -92,6 +94,17 @@ export default function App() {
     }
   }, []);
 
+  const refreshAgent = useCallback(async () => {
+    try {
+      const data = await listAgents();
+      const active =
+        data.agents.find((a) => a.id === data.activeAgentId) ?? null;
+      setActiveAgent(active);
+    } catch {
+      setActiveAgent(null);
+    }
+  }, []);
+
   const ensureActiveConversation = useCallback(
     async (list: Conversation[]) => {
       if (list.length === 0) {
@@ -117,7 +130,7 @@ export default function App() {
         if (!u) return;
 
         try {
-          await refreshDatabase();
+          await Promise.all([refreshDatabase(), refreshAgent()]);
           const list = await refreshConversations();
           await ensureActiveConversation(list);
         } catch (err) {
@@ -138,7 +151,7 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [refreshConversations, refreshDatabase, ensureActiveConversation]);
+  }, [refreshConversations, refreshDatabase, refreshAgent, ensureActiveConversation]);
 
   useEffect(() => {
     if (!activeConversationId || view !== "chat") {
@@ -277,18 +290,6 @@ export default function App() {
         onError: (message) => setError(message),
       }, {
         debug: showDebug,
-        ...(() => {
-          const agentOptions = loadAgentRequestOptions();
-          return {
-            businessContext: agentOptions.businessContext,
-            llmProvider: agentOptions.llmProvider,
-            modelName: agentOptions.modelName || undefined,
-            ollamaBaseUrl:
-              agentOptions.llmProvider === "ollama"
-                ? agentOptions.ollamaBaseUrl
-                : undefined,
-          };
-        })(),
       });
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to send message.");
@@ -384,6 +385,7 @@ export default function App() {
               user={user}
               onBack={() => setView("chat")}
               onDatabaseChange={refreshDatabase}
+              onAgentChange={refreshAgent}
             />
           ) : view === "workflowTest" ? (
             <WorkflowTestPage
@@ -399,6 +401,11 @@ export default function App() {
                   <DbSubtitle
                     name={activeDatabase?.name}
                     dbType={activeDatabase?.dbType}
+                    schemaSyncStatus={activeDatabase?.schemaSyncStatus}
+                    schemaTableCount={activeDatabase?.schemaTableCount}
+                    hasBusinessContext={activeDatabase?.hasBusinessContext}
+                    activeAgentName={activeAgent?.name}
+                    agentHasSystemPrompt={activeAgent?.hasSystemPrompt}
                     onConfigure={() => setView("settings")}
                   />
                 }

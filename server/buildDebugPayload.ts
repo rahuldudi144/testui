@@ -15,6 +15,9 @@ interface ActiveDbInfo {
   dbType: string;
   name: string;
   host: string;
+  schemaTableCount?: number;
+  metadataSource?: "stored" | "live";
+  hasBusinessContext?: boolean;
 }
 
 export function createAgentRequestIds(conversationId: string): {
@@ -71,6 +74,9 @@ export function buildFullDebugPayload(
       type: activeDb.dbType,
       name: activeDb.name,
       host: activeDb.host,
+      schemaTableCount: activeDb.schemaTableCount,
+      metadataSource: activeDb.metadataSource,
+      hasBusinessContext: activeDb.hasBusinessContext,
     },
     input: runContext.input,
     output: runContext.output,

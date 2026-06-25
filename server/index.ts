@@ -4,6 +4,7 @@ import { serveStatic } from "hono/bun";
 import { authRoutes } from "./routes/auth.js";
 import { conversationRoutes } from "./routes/conversations.js";
 import { databaseRoutes } from "./routes/databases.js";
+import { agentRoutes } from "./routes/agents.js";
 import { userRoutes } from "./routes/users.js";
 import { workflowTestRoutes } from "./routes/workflowTest.js";
 import { loadEnv, isProduction } from "./env.js";
@@ -43,6 +44,7 @@ app.get("/api/me", async (c) => {
 app.route("/api/auth", authRoutes);
 app.route("/api/conversations", conversationRoutes);
 app.route("/api/databases", databaseRoutes);
+app.route("/api/agents", agentRoutes);
 app.route("/api/users", userRoutes);
 app.route("/api/workflow-test", workflowTestRoutes);
 

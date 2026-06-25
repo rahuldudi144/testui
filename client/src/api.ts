@@ -25,14 +25,44 @@ export interface ChatMessage {
   createdAt: string;
 }
 
+export type SchemaSyncStatus = "idle" | "syncing" | "ready" | "failed";
+
 export interface UserDatabase {
   id: string;
   name: string;
   dbType: "postgres" | "mysql";
   dbUri: string;
   host: string;
+  businessContext: string | null;
+  schemaSyncStatus: SchemaSyncStatus;
+  schemaSyncedAt: string | null;
+  schemaSyncError: string | null;
+  schemaTableCount: number;
+  hasBusinessContext: boolean;
   createdAt: string;
   updatedAt: string;
+}
+
+export type LlmProvider = "openai" | "ollama";
+
+export interface UserAgent {
+  id: string;
+  name: string;
+  systemPrompt: string | null;
+  hasSystemPrompt: boolean;
+  llmProvider: LlmProvider | null;
+  modelName: string | null;
+  baseUrl: string | null;
+  hasApiKey: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface AgentLlmInput {
+  llmProvider?: LlmProvider | null;
+  modelName?: string | null;
+  apiKey?: string | null;
+  baseUrl?: string | null;
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -105,16 +135,93 @@ export async function listDatabases(): Promise<{
   return request("/api/databases");
 }
 
+export async function listAgents(): Promise<{
+  agents: UserAgent[];
+  activeAgentId: string | null;
+}> {
+  return request("/api/agents");
+}
+
+export async function createAgentProfile(
+  input: {
+    name: string;
+    systemPrompt?: string;
+    setActive?: boolean;
+  } & AgentLlmInput,
+): Promise<UserAgent> {
+  const data = await request<{ agent: UserAgent }>("/api/agents", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+  return data.agent;
+}
+
+export async function updateAgentProfile(
+  id: string,
+  input: { name?: string; systemPrompt?: string } & AgentLlmInput,
+): Promise<UserAgent> {
+  const data = await request<{ agent: UserAgent }>(`/api/agents/${id}`, {
+    method: "PATCH",
+    body: JSON.stringify(input),
+  });
+  return data.agent;
+}
+
+export async function activateAgentProfile(id: string): Promise<UserAgent> {
+  const data = await request<{ agent: UserAgent }>(`/api/agents/${id}/activate`, {
+    method: "POST",
+  });
+  return data.agent;
+}
+
+export async function deleteAgentProfile(id: string): Promise<void> {
+  await request(`/api/agents/${id}`, { method: "DELETE" });
+}
+
 export async function createDatabase(input: {
   name: string;
   dbType: "postgres" | "mysql";
   dbUri: string;
+  businessContext?: string;
   setActive?: boolean;
-}): Promise<UserDatabase> {
-  const data = await request<{ database: UserDatabase }>("/api/databases", {
-    method: "POST",
-    body: JSON.stringify(input),
-  });
+  fetchSchema?: boolean;
+  dbMetadata?: unknown;
+}): Promise<{ database: UserDatabase; warning?: string }> {
+  const data = await request<{ database: UserDatabase; warning?: string }>(
+    "/api/databases",
+    {
+      method: "POST",
+      body: JSON.stringify(input),
+    },
+  );
+  return data;
+}
+
+export async function updateDatabase(
+  id: string,
+  input: {
+    name?: string;
+    dbType?: "postgres" | "mysql";
+    dbUri?: string;
+    businessContext?: string;
+    dbMetadata?: unknown;
+  },
+): Promise<UserDatabase> {
+  const data = await request<{ database: UserDatabase }>(
+    `/api/databases/${id}`,
+    {
+      method: "PATCH",
+      body: JSON.stringify(input),
+    },
+  );
+  return data.database;
+}
+
+export async function syncDatabaseSchema(id: string): Promise<UserDatabase> {
+  const data = await request<{ database: UserDatabase }>(
+    `/api/databases/${id}/sync-schema`,
+    { method: "POST" },
+  );
   return data.database;
 }
 
@@ -138,6 +245,30 @@ export async function testDatabaseConnection(
     method: "POST",
     body: JSON.stringify({ dbType, dbUri }),
   });
+}
+
+export interface DatabaseSchemaResponse {
+  dbMetadata: unknown;
+  schemaTableCount?: number;
+  schemaSyncStatus?: SchemaSyncStatus;
+  schemaSyncedAt?: string | null;
+  schemaSyncError?: string | null;
+}
+
+export async function previewDatabaseSchema(
+  dbType: "postgres" | "mysql",
+  dbUri: string,
+): Promise<{ dbMetadata: unknown; schemaTableCount: number }> {
+  return request("/api/databases/preview-schema", {
+    method: "POST",
+    body: JSON.stringify({ dbType, dbUri }),
+  });
+}
+
+export async function fetchDatabaseSchema(
+  id: string,
+): Promise<DatabaseSchemaResponse> {
+  return request(`/api/databases/${id}/schema`);
 }
 
 export interface ManagedUser extends User {
@@ -183,6 +314,9 @@ export interface StreamHandlers {
     generatedSql?: string;
     validationPassed?: boolean;
     debug?: Record<string, unknown>;
+    totalPromptTokens?: number;
+    totalCompletionTokens?: number;
+    totalTokens?: number;
   }) => void;
   onError: (message: string) => void;
   onStatus?: (meta: { message: string; requestId?: string }) => void;
@@ -190,10 +324,6 @@ export interface StreamHandlers {
 
 export interface SendMessageOptions {
   debug?: boolean;
-  businessContext?: string;
-  llmProvider?: "openai" | "ollama";
-  modelName?: string;
-  ollamaBaseUrl?: string;
 }
 
 export async function sendMessage(
@@ -215,10 +345,6 @@ export async function sendMessage(
       dryRun,
       streamEvents: true,
       debug: options?.debug ?? false,
-      businessContext: options?.businessContext?.trim() || undefined,
-      llmProvider: options?.llmProvider,
-      modelName: options?.modelName?.trim() || undefined,
-      ollamaBaseUrl: options?.ollamaBaseUrl?.trim() || undefined,
     }),
   });
 

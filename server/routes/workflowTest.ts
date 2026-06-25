@@ -22,7 +22,8 @@ import {
   buildStressTestSummary,
   type QueryRunResult,
 } from "../stressTestAnalyze.js";
-import { getActiveDatabaseForUser, parseDbHost } from "../userDatabase.js";
+import { getActiveDatabaseForUser, parseDbHost, connectionAgentMetadata } from "../userDatabase.js";
+import { getActiveAgentForUser, profileAgentConfig } from "../userAgent.js";
 import { authMiddleware } from "./auth.js";
 import { errorMessage } from "../../../utils/errors.js";
 
@@ -209,6 +210,9 @@ workflowTestRoutes.post("/run", async (c) => {
     );
   }
 
+  const activeAgent = await getActiveAgentForUser(user.id);
+  const runnerOptions = profileAgentConfig(activeAgent);
+
   const dryRun = body.dryRun ?? false;
   const delayMs = Math.max(0, body.delayMs ?? 0);
   const items = flattenGroups(groups);
@@ -239,8 +243,8 @@ workflowTestRoutes.post("/run", async (c) => {
 
   const env = loadEnv();
   const agentConfig = {
-    provider: "openai" as const,
-    model: env.DB_AGENT_MODEL_NAME,
+    provider: runnerOptions.llmProvider ?? env.DB_AGENT_LLM_PROVIDER,
+    model: runnerOptions.modelName ?? env.DB_AGENT_MODEL_NAME,
     readOnly: env.DB_AGENT_READ_ONLY,
     maxValidationRetries: env.DB_AGENT_MAX_VALIDATION_RETRIES,
   };
@@ -293,7 +297,9 @@ workflowTestRoutes.post("/run", async (c) => {
               dryRun,
               requestId,
               correlationId,
+              ...connectionAgentMetadata(activeDb),
             },
+            runnerOptions,
           );
 
           const generatedSql =

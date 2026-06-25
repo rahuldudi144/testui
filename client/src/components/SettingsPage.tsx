@@ -12,14 +12,15 @@ interface Props {
   user: User;
   onBack: () => void;
   onDatabaseChange: () => void;
+  onAgentChange?: () => void;
 }
 
-export function SettingsPage({ user, onBack, onDatabaseChange }: Props) {
+export function SettingsPage({ user, onBack, onDatabaseChange, onAgentChange }: Props) {
   const [tab, setTab] = useState<SettingsTab>("database");
 
   return (
-    <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-6 md:px-8 md:py-8">
-      <div className="mx-auto max-w-3xl">
+    <div className="flex min-h-0 flex-1 flex-col overflow-y-auto overscroll-contain px-4 py-6 md:px-8 md:py-8">
+      <div className="flex w-full min-w-0 flex-1 flex-col">
         <PageHeader
           title="Settings"
           description="Manage database connections and test users"
@@ -34,6 +35,7 @@ export function SettingsPage({ user, onBack, onDatabaseChange }: Props) {
         <Tabs
           value={tab}
           onValueChange={(value) => setTab(value as SettingsTab)}
+          className="flex w-full min-w-0 flex-1 flex-col"
         >
           <TabsList aria-label="Settings sections">
             <TabsTrigger value="database">Database</TabsTrigger>
@@ -41,15 +43,15 @@ export function SettingsPage({ user, onBack, onDatabaseChange }: Props) {
             <TabsTrigger value="users">Users</TabsTrigger>
           </TabsList>
 
-          <TabsContent value="database">
+          <TabsContent value="database" className="w-full">
             <DatabaseSettings onConnectionChange={onDatabaseChange} />
           </TabsContent>
 
-          <TabsContent value="agent">
-            <AgentSettings />
+          <TabsContent value="agent" className="w-full">
+            <AgentSettings onAgentChange={onAgentChange} />
           </TabsContent>
 
-          <TabsContent value="users">
+          <TabsContent value="users" className="w-full">
             <UserSettings currentUser={user} />
           </TabsContent>
         </Tabs>
