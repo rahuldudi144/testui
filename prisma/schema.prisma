@@ -84,34 +84,68 @@ model Message {
 }
 
 model WorkflowTest {
-  id        String            @id @default(cuid())
+  id        String              @id @default(cuid())
   userId    String
-  user      User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user      User                @relation(fields: [userId], references: [id], onDelete: Cascade)
   name      String
-  dryRun    Boolean           @default(false)
-  delayMs   Int               @default(0)
-  groups    Json
-  createdAt DateTime          @default(now())
-  updatedAt DateTime          @updatedAt
+  dryRun    Boolean             @default(false)
+  delayMs   Int                 @default(0)
+  createdAt DateTime            @default(now())
+  updatedAt DateTime            @updatedAt
+  groups    WorkflowTestGroup[]
   runs      WorkflowTestRun[]
 
   @@unique([userId, name])
   @@index([userId, updatedAt(sort: Desc)])
 }
 
-model WorkflowTestRun {
-  id             String        @id @default(cuid())
-  userId         String
-  user           User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+enum WorkflowTestGroupKind {
+  manual
+  failures
+}
+
+model WorkflowTestGroup {
+  id             String                @id @default(cuid())
   workflowTestId String
-  workflowTest   WorkflowTest  @relation(fields: [workflowTestId], references: [id], onDelete: Cascade)
+  workflowTest   WorkflowTest          @relation(fields: [workflowTestId], references: [id], onDelete: Cascade)
+  name           String
+  kind           WorkflowTestGroupKind @default(manual)
+  sortOrder      Int                   @default(0)
+  queries        WorkflowTestQuery[]
+  createdAt      DateTime              @default(now())
+  updatedAt      DateTime              @updatedAt
+
+  @@index([workflowTestId, sortOrder])
+}
+
+model WorkflowTestQuery {
+  id              String            @id @default(cuid())
+  groupId         String
+  group           WorkflowTestGroup @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  query           String            @db.Text
+  sortOrder       Int               @default(0)
+  sourceRunId     String?
+  sourceRun       WorkflowTestRun?  @relation(fields: [sourceRunId], references: [id], onDelete: SetNull)
+  sourceGroupName String?
+  createdAt       DateTime          @default(now())
+
+  @@index([groupId, sortOrder])
+}
+
+model WorkflowTestRun {
+  id             String              @id @default(cuid())
+  userId         String
+  user           User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  workflowTestId String
+  workflowTest   WorkflowTest        @relation(fields: [workflowTestId], references: [id], onDelete: Cascade)
   testName       String
   dryRun         Boolean
   delayMs        Int
   database       Json
   summary        Json
   results        Json
-  ranAt          DateTime      @default(now())
+  ranAt          DateTime            @default(now())
+  sourcedQueries WorkflowTestQuery[]
 
   @@index([userId, ranAt(sort: Desc)])
   @@index([workflowTestId, ranAt(sort: Desc)])

@@ -1,6 +1,10 @@
 import { useCallback, useEffect, useState } from "react";
 import { Play, RotateCcw } from "lucide-react";
-import type { WorkflowTestCompletePayload } from "../api";
+import {
+  getWorkflowTest,
+  type WorkflowTestCompletePayload,
+  type WorkflowTestGroupRecord,
+} from "../api";
 import {
   useWorkflowTestRunner,
   type WorkflowTestRunConfig,
@@ -9,7 +13,7 @@ import {
   toApiGroups,
   type StressTestGroupInput,
 } from "../lib/parseQueryGroups";
-import { groupsToFormInput } from "../lib/workflowTestGroups";
+import { groupsToFormInput, getFailuresGroup } from "../lib/workflowTestGroups";
 import type { ParsedWorkflowTestImport } from "../lib/parseWorkflowTestJson";
 import { PageHeader } from "./layout/PageHeader";
 import { WorkflowTestForm } from "./workflow-test/WorkflowTestForm";
@@ -55,6 +59,9 @@ export function WorkflowTestPage({ onBack, dbConfigured, onOpenSettings }: Props
   ]);
   const [dryRun, setDryRun] = useState(false);
   const [delayMs, setDelayMs] = useState(0);
+  const [failuresGroup, setFailuresGroup] = useState<WorkflowTestGroupRecord | null>(
+    null,
+  );
   const [localError, setLocalError] = useState<string | null>(null);
 
   const error = localError ?? runnerError;
@@ -71,6 +78,22 @@ export function WorkflowTestPage({ onBack, dbConfigured, onOpenSettings }: Props
       syncFormFromConfig(lastConfig);
     }
   }, [lastConfig, syncFormFromConfig]);
+
+  useEffect(() => {
+    const testId = report?.testId;
+    if (!testId) return;
+    let cancelled = false;
+    void getWorkflowTest(testId)
+      .then((test) => {
+        if (!cancelled) {
+          setFailuresGroup(getFailuresGroup(test.groups) ?? null);
+        }
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [report?.testId, savedRefreshToken]);
 
   useEffect(() => {
     if (report && !running) {
@@ -144,6 +167,7 @@ export function WorkflowTestPage({ onBack, dbConfigured, onOpenSettings }: Props
   function handleJsonImport(data: ParsedWorkflowTestImport) {
     setTestName(data.testName);
     setGroups(data.groups);
+    setFailuresGroup(null);
     if (data.dryRun !== undefined) setDryRun(data.dryRun);
     if (data.delayMs !== undefined) setDelayMs(data.delayMs);
     setLocalError(null);
@@ -154,11 +178,13 @@ export function WorkflowTestPage({ onBack, dbConfigured, onOpenSettings }: Props
   function handleLoadSavedTest(data: {
     testName: string;
     groups: StressTestGroupInput[];
+    failuresGroup: WorkflowTestGroupRecord | null;
     dryRun: boolean;
     delayMs: number;
   }) {
     setTestName(data.testName);
     setGroups(data.groups);
+    setFailuresGroup(data.failuresGroup);
     setDryRun(data.dryRun);
     setDelayMs(data.delayMs);
     setLocalError(null);
@@ -297,6 +323,7 @@ export function WorkflowTestPage({ onBack, dbConfigured, onOpenSettings }: Props
                 onDryRunChange={setDryRun}
                 delayMs={delayMs}
                 onDelayMsChange={setDelayMs}
+                failuresGroup={failuresGroup}
                 disabled={running}
               />
             </div>

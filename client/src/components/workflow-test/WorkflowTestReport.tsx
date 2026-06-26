@@ -1,6 +1,9 @@
-import { Fragment, useMemo, useState } from "react";
-import { ChevronDown, ChevronRight, Download } from "lucide-react";
+import { Fragment, useEffect, useMemo, useState } from "react";
+import { ChevronDown, ChevronRight, Download, RotateCcw, Save } from "lucide-react";
 import type { QueryRunResult, WorkflowTestCompletePayload } from "../../api";
+import { getWorkflowTest, importWorkflowTestFailures } from "../../api";
+import { useWorkflowTestRunner } from "../../context/WorkflowTestRunnerContext";
+import { getFailuresGroup } from "../../lib/workflowTestGroups";
 import { cn } from "../../lib/cn";
 import { Badge } from "../ui/Badge";
 import { Button } from "../ui/Button";
@@ -116,8 +119,62 @@ function ResultInspector({ result }: { result: QueryRunResult }) {
 }
 
 export function WorkflowTestReport({ report }: Props) {
+  const { runGroup, running } = useWorkflowTestRunner();
   const [filter, setFilter] = useState<StatusFilter>("all");
   const [expandedKey, setExpandedKey] = useState<string | null>(null);
+  const [failuresGroupId, setFailuresGroupId] = useState<string | null>(null);
+  const [importNotice, setImportNotice] = useState<string | null>(null);
+  const [importing, setImporting] = useState(false);
+
+  const { summary } = report;
+  const failureCount = summary.failed + summary.errors;
+  const canImport = failureCount > 0 && Boolean(report.testId && report.runId);
+
+  useEffect(() => {
+    if (!report.testId) return;
+    let cancelled = false;
+    void getWorkflowTest(report.testId)
+      .then((test) => {
+        if (cancelled) return;
+        const failures = getFailuresGroup(test.groups);
+        if (failures && failures.queries.length > 0) {
+          setFailuresGroupId(failures.id);
+        }
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [report.testId, report.runId]);
+
+  async function handleSaveFailures() {
+    if (!report.testId || !report.runId) return;
+    setImporting(true);
+    setImportNotice(null);
+    try {
+      const result = await importWorkflowTestFailures(report.testId, report.runId);
+      const failures = getFailuresGroup(result.groups);
+      setFailuresGroupId(failures?.id ?? null);
+      const skippedText =
+        result.skipped > 0 ? `, skipped ${result.skipped} duplicate(s)` : "";
+      setImportNotice(`Added ${result.added} quer${result.added === 1 ? "y" : "ies"} to failures group${skippedText}.`);
+    } catch (err) {
+      setImportNotice(
+        err instanceof Error ? err.message : "Failed to save failures to group.",
+      );
+    } finally {
+      setImporting(false);
+    }
+  }
+
+  async function handleRunFailures() {
+    if (!report.testId || !failuresGroupId) return;
+    await runGroup(report.testId, failuresGroupId, {
+      testName: report.testName,
+      dryRun: report.dryRun,
+      delayMs: report.delayMs ?? 0,
+    });
+  }
 
   const filtered = useMemo(() => {
     if (filter === "all") return report.results;
@@ -140,7 +197,6 @@ export function WorkflowTestReport({ report }: Props) {
     URL.revokeObjectURL(url);
   }
 
-  const { summary } = report;
   const groupRows = Object.entries(summary.byGroup);
 
   return (
@@ -153,11 +209,41 @@ export function WorkflowTestReport({ report }: Props) {
             {report.database.dbType}) · {report.dryRun ? "dry run" : "execute"}
           </p>
         </div>
-        <Button type="button" variant="secondary" size="sm" onClick={exportJson}>
-          <Download className="h-4 w-4" />
-          Export JSON
-        </Button>
+        <div className="flex flex-wrap gap-2">
+          {canImport && (
+            <Button
+              type="button"
+              variant="secondary"
+              size="sm"
+              loading={importing}
+              disabled={running}
+              onClick={() => void handleSaveFailures()}
+            >
+              <Save className="h-4 w-4" />
+              Save failures to group
+            </Button>
+          )}
+          {failuresGroupId && (
+            <Button
+              type="button"
+              size="sm"
+              disabled={running}
+              onClick={() => void handleRunFailures()}
+            >
+              <RotateCcw className="h-4 w-4" />
+              Run failures only
+            </Button>
+          )}
+          <Button type="button" variant="secondary" size="sm" onClick={exportJson}>
+            <Download className="h-4 w-4" />
+            Export JSON
+          </Button>
+        </div>
       </div>
+
+      {importNotice && (
+        <p className="text-sm text-muted-foreground">{importNotice}</p>
+      )}
 
       <InspectSection title="Run summary">
         <div className="space-y-4">

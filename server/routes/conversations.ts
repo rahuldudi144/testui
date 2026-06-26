@@ -19,6 +19,10 @@ import { isPublicStreamEvent } from "../streamEventFilter.js";
 import { getActiveDatabaseForUser, parseDbHost, connectionAgentMetadata } from "../userDatabase.js";
 import { getActiveAgentForUser, profileAgentConfig } from "../userAgent.js";
 import { countTables } from "../syncConnectionSchema.js";
+import {
+  generateConversationTitle,
+  isDefaultConversationTitle,
+} from "../conversationTitle.js";
 import { authMiddleware } from "./auth.js";
 
 type AuthUser = { id: string; username: string; createdAt: Date };
@@ -278,14 +282,20 @@ conversationRoutes.post("/:id/messages", async (c) => {
           },
         });
 
+        const title = isDefaultConversationTitle(conversation.title)
+          ? await generateConversationTitle(
+              query,
+              conversationId,
+              dbType,
+              runnerOptions,
+            )
+          : conversation.title;
+
         await prisma.conversation.update({
           where: { id: conversationId },
           data: {
             updatedAt: new Date(),
-            title:
-              conversation.title === "New conversation"
-                ? query.slice(0, 60)
-                : conversation.title,
+            title,
           },
         });
 
@@ -418,14 +428,20 @@ conversationRoutes.post("/:id/messages", async (c) => {
         },
       });
 
+      const title = isDefaultConversationTitle(conversation.title)
+        ? await generateConversationTitle(
+            query,
+            conversationId,
+            dbType,
+            runnerOptions,
+          )
+        : conversation.title;
+
       await prisma.conversation.update({
         where: { id: conversationId },
         data: {
           updatedAt: new Date(),
-          title:
-            conversation.title === "New conversation"
-              ? query.slice(0, 60)
-              : conversation.title,
+          title,
         },
       });
 

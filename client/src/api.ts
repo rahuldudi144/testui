@@ -469,12 +469,22 @@ export interface WorkflowTestCompletePayload {
   results: QueryRunResult[];
 }
 
+export type WorkflowTestGroupKind = "manual" | "failures";
+
+export interface WorkflowTestGroupRecord {
+  id: string;
+  name: string;
+  kind: WorkflowTestGroupKind;
+  sortOrder: number;
+  queries: string[];
+}
+
 export interface SavedWorkflowTest {
   id: string;
   name: string;
   dryRun: boolean;
   delayMs: number;
-  groups: Array<{ name: string; queries: string[] }>;
+  groups: WorkflowTestGroupRecord[];
   createdAt: string;
   updatedAt: string;
   runCount: number;
@@ -512,32 +522,10 @@ export interface WorkflowTestHandlers {
   onError?: (message: string) => void;
 }
 
-export async function runWorkflowTest(
-  input: {
-    testName: string;
-    groups: Array<{ name: string; queries: string[] }>;
-    dryRun?: boolean;
-    delayMs?: number;
-  },
+async function consumeWorkflowTestStream(
+  res: Response,
   handlers: WorkflowTestHandlers,
-  signal?: AbortSignal,
 ): Promise<void> {
-  const res = await fetch("/api/workflow-test/run", {
-    method: "POST",
-    credentials: "include",
-    headers: {
-      "Content-Type": "application/json",
-      Accept: "text/event-stream",
-    },
-    body: JSON.stringify(input),
-    signal,
-  });
-
-  if (!res.ok) {
-    const data = await res.json().catch(() => ({}));
-    throw new Error(data.error ?? `Request failed (${res.status})`);
-  }
-
   if (!res.body) throw new Error("No response body for stream.");
 
   const reader = res.body.getReader();
@@ -577,6 +565,79 @@ export async function runWorkflowTest(
       }
     }
   }
+}
+
+export async function runWorkflowTest(
+  input: {
+    testName: string;
+    groups?: Array<{ name: string; queries: string[] }>;
+    groupIds?: string[];
+    dryRun?: boolean;
+    delayMs?: number;
+  },
+  handlers: WorkflowTestHandlers,
+  signal?: AbortSignal,
+): Promise<void> {
+  const res = await fetch("/api/workflow-test/run", {
+    method: "POST",
+    credentials: "include",
+    headers: {
+      "Content-Type": "application/json",
+      Accept: "text/event-stream",
+    },
+    body: JSON.stringify(input),
+    signal,
+  });
+
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.error ?? `Request failed (${res.status})`);
+  }
+
+  await consumeWorkflowTestStream(res, handlers);
+}
+
+export async function runWorkflowTestGroup(
+  testId: string,
+  groupId: string,
+  input: { dryRun?: boolean; delayMs?: number } | undefined,
+  handlers: WorkflowTestHandlers,
+  signal?: AbortSignal,
+): Promise<void> {
+  const res = await fetch(
+    `/api/workflow-test/${testId}/groups/${groupId}/run`,
+    {
+      method: "POST",
+      credentials: "include",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "text/event-stream",
+      },
+      body: JSON.stringify(input ?? {}),
+      signal,
+    },
+  );
+
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.error ?? `Request failed (${res.status})`);
+  }
+
+  await consumeWorkflowTestStream(res, handlers);
+}
+
+export async function importWorkflowTestFailures(
+  testId: string,
+  runId: string,
+): Promise<{
+  groups: WorkflowTestGroupRecord[];
+  added: number;
+  skipped: number;
+}> {
+  return request(`/api/workflow-test/${testId}/groups/failures/import`, {
+    method: "POST",
+    body: JSON.stringify({ runId }),
+  });
 }
 
 export async function listWorkflowTests(): Promise<SavedWorkflowTest[]> {

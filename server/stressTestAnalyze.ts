@@ -70,9 +70,14 @@ const NODE_LABELS: Record<string, string> = {
   planner: "Planner",
   answer: "Answer",
   schemaResolver: "Schema resolver",
+  graphBuilder: "Relationship graph",
+  entityExtractor: "Entity extractor",
+  pathFinder: "Path finder",
+  operationPlanner: "Operation planner",
   buildQuery: "Build query",
   validateQuery: "Validate query",
   runQuery: "Run query",
+  repairQuery: "Repair query",
   formatResponse: "Format response",
 };
 

@@ -410,28 +410,34 @@ const ALL_NODES = [
   { id: "planner", label: "Planner" },
   { id: "answer", label: "Answer" },
   { id: "schemaResolver", label: "Schema resolver" },
+  { id: "graphBuilder", label: "Relationship graph" },
+  { id: "entityExtractor", label: "Entity extractor" },
+  { id: "pathFinder", label: "Path finder" },
+  { id: "operationPlanner", label: "Operation planner" },
   { id: "buildQuery", label: "Build query" },
   { id: "validateQuery", label: "Validate query" },
   { id: "runQuery", label: "Run query" },
+  { id: "repairQuery", label: "Repair query" },
   { id: "formatResponse", label: "Format response" },
-  { id: "verifyAnswer", label: "Verify answer" },
 ] as const;
 
 const GRAPH_EDGES: Array<{ from: string; to: string; label?: string }> = [
   { from: "planner", to: "answer", label: "non-SQL / off-domain" },
   { from: "planner", to: "schemaResolver", label: "domain + SQL" },
-  { from: "schemaResolver", to: "buildQuery" },
+  { from: "schemaResolver", to: "graphBuilder" },
+  { from: "graphBuilder", to: "entityExtractor" },
+  { from: "entityExtractor", to: "pathFinder" },
+  { from: "pathFinder", to: "operationPlanner" },
+  { from: "operationPlanner", to: "buildQuery" },
   { from: "buildQuery", to: "validateQuery" },
   { from: "validateQuery", to: "runQuery", label: "valid" },
   { from: "validateQuery", to: "formatResponse", label: "dry run" },
   { from: "validateQuery", to: "buildQuery", label: "validation retry" },
   { from: "validateQuery", to: "answer", label: "validation exhausted" },
   { from: "runQuery", to: "formatResponse", label: "success" },
-  { from: "runQuery", to: "buildQuery", label: "execution retry" },
+  { from: "runQuery", to: "repairQuery", label: "execution retry" },
   { from: "runQuery", to: "answer", label: "execution exhausted" },
-  { from: "formatResponse", to: "verifyAnswer" },
-  { from: "verifyAnswer", to: "buildQuery", label: "answer retry" },
-  { from: "verifyAnswer", to: "answer", label: "verification exhausted" },
+  { from: "repairQuery", to: "validateQuery", label: "re-validate" },
 ];
 
 function spanMap(
@@ -598,9 +604,6 @@ function resolveNodeState(
   if (nodeId === "runQuery" && metrics.totals.rowsReturned !== undefined) {
     state.rowCount = metrics.totals.rowsReturned;
   }
-  if (nodeId === "verifyAnswer" && workflow.answerSatisfied !== undefined) {
-    state.answerSatisfied = workflow.answerSatisfied;
-  }
   if (nodeId === "schemaResolver" && metrics.totals.tablesInSchema !== undefined) {
     state.tablesInSchema = metrics.totals.tablesInSchema;
   }
@@ -633,9 +636,6 @@ function nodeStatusFromHistory(
     return "failed";
   }
   if (nodeId === "validateQuery" && changes.sqlParserPassed === false) {
-    return "failed";
-  }
-  if (nodeId === "verifyAnswer" && changes.answerSatisfied === false) {
     return "failed";
   }
 
@@ -773,11 +773,15 @@ const NODE_LABELS: Record<string, string> = {
   planner: "Planner",
   answer: "Answer",
   schemaResolver: "Schema resolver",
+  graphBuilder: "Relationship graph",
+  entityExtractor: "Entity extractor",
+  pathFinder: "Path finder",
+  operationPlanner: "Operation planner",
   buildQuery: "Build query",
   validateQuery: "Validate query",
   runQuery: "Run query",
+  repairQuery: "Repair query",
   formatResponse: "Format response",
-  verifyAnswer: "Verify answer",
 };
 
 export interface StateTimelineStep {

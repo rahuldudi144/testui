@@ -13,17 +13,27 @@ import { beginRequestDebug } from "../debugCapture.js";
 import { loadEnv } from "../env.js";
 import { invokeWithHistory } from "../runAgentWithHistory.js";
 import {
-  flattenGroups,
+  flattenGroupRecords,
   normalizeGroups,
-  type StressTestGroup,
+  type WorkflowTestGroupRecord,
 } from "../parseStressQueries.js";
 import {
   analyzeStressRunResult,
   buildStressTestSummary,
   type QueryRunResult,
 } from "../stressTestAnalyze.js";
-import { getActiveDatabaseForUser, parseDbHost, connectionAgentMetadata } from "../userDatabase.js";
+import {
+  getActiveDatabaseForUser,
+  parseDbHost,
+  connectionAgentMetadata,
+} from "../userDatabase.js";
 import { getActiveAgentForUser, profileAgentConfig } from "../userAgent.js";
+import {
+  ensureFailuresGroup,
+  importFailuresFromRun,
+  loadTestGroups,
+  saveManualGroups,
+} from "../workflowTestGroups.js";
 import { authMiddleware } from "./auth.js";
 import { errorMessage } from "../../../utils/errors.js";
 
@@ -35,28 +45,195 @@ export const workflowTestRoutes = new Hono<{ Variables: { user: AuthUser } }>();
 
 workflowTestRoutes.use("*", authMiddleware);
 
-function groupsToJson(groups: StressTestGroup[]): Prisma.InputJsonValue {
-  return groups.map((group) => ({
-    name: group.name,
-    queries: group.queries,
-  })) as unknown as Prisma.InputJsonValue;
+interface RunWorkflowTestOptions {
+  userId: string;
+  testId: string;
+  testName: string;
+  groups: WorkflowTestGroupRecord[];
+  groupIds?: string[];
+  dryRun: boolean;
+  delayMs: number;
 }
 
-function parseStoredGroups(value: unknown): StressTestGroup[] {
-  if (!Array.isArray(value)) return [];
-  const groups: StressTestGroup[] = [];
-  for (const item of value) {
-    if (!item || typeof item !== "object") continue;
-    const record = item as Record<string, unknown>;
-    const name = typeof record.name === "string" ? record.name : "";
-    const queries = Array.isArray(record.queries)
-      ? record.queries.filter((q): q is string => typeof q === "string")
-      : [];
-    if (name && queries.length > 0) {
-      groups.push({ name, queries });
+async function executeWorkflowTestRun(
+  options: RunWorkflowTestOptions,
+  stream: {
+    writeSSE: (message: { event: string; data: string }) => Promise<void>;
+  },
+): Promise<void> {
+  const { userId, testId, testName, groups, groupIds, dryRun, delayMs } =
+    options;
+
+  const activeDb = await getActiveDatabaseForUser(userId);
+  if (!activeDb) {
+    await stream.writeSSE({
+      event: "error",
+      data: JSON.stringify({
+        message:
+          "No database configured. Add a PostgreSQL or MySQL connection in Settings.",
+      }),
+    });
+    return;
+  }
+
+  const activeAgent = await getActiveAgentForUser(userId);
+  const runnerOptions = profileAgentConfig(activeAgent);
+
+  const items = flattenGroupRecords(groups, groupIds);
+  if (items.length === 0) {
+    await stream.writeSSE({
+      event: "error",
+      data: JSON.stringify({
+        message: "No queries to run for the selected group(s).",
+      }),
+    });
+    return;
+  }
+
+  const dbType = activeDb.dbType as "postgres" | "mysql";
+  const dbInfo = {
+    dbType: activeDb.dbType,
+    name: activeDb.name,
+    host: parseDbHost(activeDb.dbUri),
+  };
+
+  const env = loadEnv();
+  const agentConfig = {
+    provider: runnerOptions.llmProvider ?? env.DB_AGENT_LLM_PROVIDER,
+    model: runnerOptions.modelName ?? env.DB_AGENT_MODEL_NAME,
+    readOnly: env.DB_AGENT_READ_ONLY,
+    maxValidationRetries: env.DB_AGENT_MAX_VALIDATION_RETRIES,
+  };
+
+  const results: QueryRunResult[] = [];
+
+  await stream.writeSSE({
+    event: "start",
+    data: JSON.stringify({
+      testName,
+      testId,
+      totalQueries: items.length,
+      dryRun,
+    }),
+  });
+
+  for (let index = 0; index < items.length; index += 1) {
+    const { groupName, query } = items[index]!;
+
+    await stream.writeSSE({
+      event: "progress",
+      data: JSON.stringify({
+        groupName,
+        queryIndex: index + 1,
+        totalQueries: items.length,
+        query,
+      }),
+    });
+
+    const requestId = randomUUID();
+    const correlationId = `workflow-${randomUUID()}`;
+    beginRequestDebug(requestId, correlationId);
+
+    const startedAt = Date.now();
+    let runResult: QueryRunResult;
+
+    try {
+      const { result, stateHistory } = await invokeWithHistory(
+        dbType,
+        activeDb.dbUri,
+        {
+          query,
+          messages: [],
+          dryRun,
+          requestId,
+          correlationId,
+          ...connectionAgentMetadata(activeDb),
+        },
+        runnerOptions,
+      );
+
+      const generatedSql =
+        result.generatedSql ?? extractSqlFromMarkdown(result.markdownResponse);
+
+      const output = invokeResultDebugFields(result);
+      const runContext = buildAgentRunContext(
+        query,
+        dryRun,
+        [],
+        agentConfig,
+        output,
+      );
+
+      const debug = buildFullDebugPayload(
+        requestId,
+        correlationId,
+        dbInfo,
+        runContext,
+        { generatedSql, stateHistory },
+      );
+
+      runResult = analyzeStressRunResult({
+        query,
+        groupName,
+        result,
+        debug,
+        durationMs: Date.now() - startedAt,
+        dryRun,
+        requestId,
+      });
+    } catch (err) {
+      runResult = analyzeStressRunResult({
+        query,
+        groupName,
+        durationMs: Date.now() - startedAt,
+        dryRun,
+        requestId,
+        errorMessage: errorMessage(err),
+      });
+    }
+
+    results.push(runResult);
+
+    await stream.writeSSE({
+      event: "result",
+      data: JSON.stringify(runResult),
+    });
+
+    if (delayMs > 0 && index < items.length - 1) {
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
     }
   }
-  return groups;
+
+  const summary = buildStressTestSummary(results);
+  const ranAt = new Date();
+
+  const savedRun = await prisma.workflowTestRun.create({
+    data: {
+      userId,
+      workflowTestId: testId,
+      testName,
+      dryRun,
+      delayMs,
+      database: dbInfo as unknown as Prisma.InputJsonValue,
+      summary: summary as unknown as Prisma.InputJsonValue,
+      results: results as unknown as Prisma.InputJsonValue,
+      ranAt,
+    },
+  });
+
+  await stream.writeSSE({
+    event: "complete",
+    data: JSON.stringify({
+      testId,
+      runId: savedRun.id,
+      testName,
+      dryRun,
+      database: dbInfo,
+      ranAt: ranAt.toISOString(),
+      summary,
+      results,
+    }),
+  });
 }
 
 workflowTestRoutes.get("/", async (c) => {
@@ -78,13 +255,13 @@ workflowTestRoutes.get("/", async (c) => {
     },
   });
 
-  return c.json({
-    tests: tests.map((test) => ({
+  const testsWithGroups = await Promise.all(
+    tests.map(async (test) => ({
       id: test.id,
       name: test.name,
       dryRun: test.dryRun,
       delayMs: test.delayMs,
-      groups: parseStoredGroups(test.groups),
+      groups: await loadTestGroups(test.id),
       createdAt: test.createdAt.toISOString(),
       updatedAt: test.updatedAt.toISOString(),
       runCount: test._count.runs,
@@ -96,7 +273,9 @@ workflowTestRoutes.get("/", async (c) => {
           }
         : null,
     })),
-  });
+  );
+
+  return c.json({ tests: testsWithGroups });
 });
 
 workflowTestRoutes.get("/runs/:runId", async (c) => {
@@ -120,6 +299,80 @@ workflowTestRoutes.get("/runs/:runId", async (c) => {
       summary: run.summary,
       results: run.results,
     },
+  });
+});
+
+workflowTestRoutes.post("/:testId/groups/failures/import", async (c) => {
+  const user = c.get("user");
+  const testId = c.req.param("testId");
+  const body = await c.req.json<{ runId?: string }>();
+
+  const runId = body.runId?.trim();
+  if (!runId) {
+    return c.json({ error: "runId is required." }, 400);
+  }
+
+  const test = await prisma.workflowTest.findFirst({
+    where: { id: testId, userId: user.id },
+  });
+  if (!test) return c.json({ error: "Workflow test not found." }, 404);
+
+  try {
+    const result = await importFailuresFromRun(testId, runId, user.id);
+    return c.json(result);
+  } catch (err) {
+    return c.json({ error: errorMessage(err) }, 400);
+  }
+});
+
+workflowTestRoutes.post("/:testId/groups/:groupId/run", async (c) => {
+  const user = c.get("user");
+  const testId = c.req.param("testId");
+  const groupId = c.req.param("groupId");
+  const body = await c.req
+    .json<{ dryRun?: boolean; delayMs?: number }>()
+    .catch(() => ({}));
+
+  const test = await prisma.workflowTest.findFirst({
+    where: { id: testId, userId: user.id },
+  });
+  if (!test) return c.json({ error: "Workflow test not found." }, 404);
+
+  const groups = await loadTestGroups(testId);
+  const group = groups.find((g) => g.id === groupId);
+  if (!group) {
+    return c.json({ error: "Workflow test group not found." }, 404);
+  }
+
+  const dryRun = body.dryRun ?? test.dryRun;
+  const delayMs = Math.max(0, body.delayMs ?? test.delayMs);
+
+  return streamSSE(c, async (stream) => {
+    const keepAlive = setInterval(() => {
+      void stream.writeSSE({ event: "ping", data: "{}" });
+    }, STREAM_KEEPALIVE_MS);
+
+    try {
+      await executeWorkflowTestRun(
+        {
+          userId: user.id,
+          testId: test.id,
+          testName: test.name,
+          groups,
+          groupIds: [groupId],
+          dryRun,
+          delayMs,
+        },
+        stream,
+      );
+    } catch (err) {
+      await stream.writeSSE({
+        event: "error",
+        data: JSON.stringify({ message: errorMessage(err) }),
+      });
+    } finally {
+      clearInterval(keepAlive);
+    }
   });
 });
 
@@ -151,7 +404,7 @@ workflowTestRoutes.get("/:testId", async (c) => {
       name: test.name,
       dryRun: test.dryRun,
       delayMs: test.delayMs,
-      groups: parseStoredGroups(test.groups),
+      groups: await loadTestGroups(test.id),
       createdAt: test.createdAt.toISOString(),
       updatedAt: test.updatedAt.toISOString(),
       runs: test.runs.map((run) => ({
@@ -184,6 +437,7 @@ workflowTestRoutes.post("/run", async (c) => {
     dryRun?: boolean;
     delayMs?: number;
     groups?: Array<{ name?: string; queries?: string[] | string }>;
+    groupIds?: string[];
   }>();
 
   const testName = body.testName?.trim();
@@ -191,37 +445,18 @@ workflowTestRoutes.post("/run", async (c) => {
     return c.json({ error: "A non-empty test name is required." }, 400);
   }
 
-  const groups = normalizeGroups(body.groups ?? []);
-  if (groups.length === 0) {
+  const manualGroups = normalizeGroups(body.groups ?? []);
+  const groupIds = body.groupIds?.filter(Boolean);
+
+  if (!groupIds?.length && manualGroups.length === 0) {
     return c.json(
       { error: "At least one group with a name and queries is required." },
       400,
     );
   }
 
-  const activeDb = await getActiveDatabaseForUser(user.id);
-  if (!activeDb) {
-    return c.json(
-      {
-        error:
-          "No database configured. Add a PostgreSQL or MySQL connection in Settings.",
-      },
-      400,
-    );
-  }
-
-  const activeAgent = await getActiveAgentForUser(user.id);
-  const runnerOptions = profileAgentConfig(activeAgent);
-
   const dryRun = body.dryRun ?? false;
   const delayMs = Math.max(0, body.delayMs ?? 0);
-  const items = flattenGroups(groups);
-  const dbType = activeDb.dbType as "postgres" | "mysql";
-  const dbInfo = {
-    dbType: activeDb.dbType,
-    name: activeDb.name,
-    host: parseDbHost(activeDb.dbUri),
-  };
 
   const savedTest = await prisma.workflowTest.upsert({
     where: {
@@ -232,159 +467,39 @@ workflowTestRoutes.post("/run", async (c) => {
       name: testName,
       dryRun,
       delayMs,
-      groups: groupsToJson(groups),
     },
     update: {
       dryRun,
       delayMs,
-      groups: groupsToJson(groups),
     },
   });
 
-  const env = loadEnv();
-  const agentConfig = {
-    provider: runnerOptions.llmProvider ?? env.DB_AGENT_LLM_PROVIDER,
-    model: runnerOptions.modelName ?? env.DB_AGENT_MODEL_NAME,
-    readOnly: env.DB_AGENT_READ_ONLY,
-    maxValidationRetries: env.DB_AGENT_MAX_VALIDATION_RETRIES,
-  };
+  if (manualGroups.length > 0) {
+    await saveManualGroups(savedTest.id, manualGroups);
+  } else {
+    await ensureFailuresGroup(savedTest.id);
+  }
+
+  const groups = await loadTestGroups(savedTest.id);
 
   return streamSSE(c, async (stream) => {
     const keepAlive = setInterval(() => {
       void stream.writeSSE({ event: "ping", data: "{}" });
     }, STREAM_KEEPALIVE_MS);
 
-    const results: QueryRunResult[] = [];
-
     try {
-      await stream.writeSSE({
-        event: "start",
-        data: JSON.stringify({
-          testName,
-          testId: savedTest.id,
-          totalQueries: items.length,
-          dryRun,
-        }),
-      });
-
-      for (let index = 0; index < items.length; index += 1) {
-        const { groupName, query } = items[index]!;
-
-        await stream.writeSSE({
-          event: "progress",
-          data: JSON.stringify({
-            groupName,
-            queryIndex: index + 1,
-            totalQueries: items.length,
-            query,
-          }),
-        });
-
-        const requestId = randomUUID();
-        const correlationId = `workflow-${randomUUID()}`;
-        beginRequestDebug(requestId, correlationId);
-
-        const startedAt = Date.now();
-        let runResult: QueryRunResult;
-
-        try {
-          const { result, stateHistory } = await invokeWithHistory(
-            dbType,
-            activeDb.dbUri,
-            {
-              query,
-              messages: [],
-              dryRun,
-              requestId,
-              correlationId,
-              ...connectionAgentMetadata(activeDb),
-            },
-            runnerOptions,
-          );
-
-          const generatedSql =
-            result.generatedSql ??
-            extractSqlFromMarkdown(result.markdownResponse);
-
-          const output = invokeResultDebugFields(result);
-          const runContext = buildAgentRunContext(
-            query,
-            dryRun,
-            [],
-            agentConfig,
-            output,
-          );
-
-          const debug = buildFullDebugPayload(
-            requestId,
-            correlationId,
-            dbInfo,
-            runContext,
-            { generatedSql, stateHistory },
-          );
-
-          runResult = analyzeStressRunResult({
-            query,
-            groupName,
-            result,
-            debug,
-            durationMs: Date.now() - startedAt,
-            dryRun,
-            requestId,
-          });
-        } catch (err) {
-          runResult = analyzeStressRunResult({
-            query,
-            groupName,
-            durationMs: Date.now() - startedAt,
-            dryRun,
-            requestId,
-            errorMessage: errorMessage(err),
-          });
-        }
-
-        results.push(runResult);
-
-        await stream.writeSSE({
-          event: "result",
-          data: JSON.stringify(runResult),
-        });
-
-        if (delayMs > 0 && index < items.length - 1) {
-          await new Promise((resolve) => setTimeout(resolve, delayMs));
-        }
-      }
-
-      const summary = buildStressTestSummary(results);
-      const ranAt = new Date();
-
-      const savedRun = await prisma.workflowTestRun.create({
-        data: {
+      await executeWorkflowTestRun(
+        {
           userId: user.id,
-          workflowTestId: savedTest.id,
+          testId: savedTest.id,
           testName,
+          groups,
+          groupIds,
           dryRun,
           delayMs,
-          database: dbInfo as unknown as Prisma.InputJsonValue,
-          summary: summary as unknown as Prisma.InputJsonValue,
-          results: results as unknown as Prisma.InputJsonValue,
-          ranAt,
         },
-      });
-
-      await stream.writeSSE({
-        event: "complete",
-        data: JSON.stringify({
-          testId: savedTest.id,
-          runId: savedRun.id,
-          testName,
-          dryRun,
-          database: dbInfo,
-          ranAt: ranAt.toISOString(),
-          summary,
-          results,
-        }),
-      });
+        stream,
+      );
     } catch (err) {
       await stream.writeSSE({
         event: "error",

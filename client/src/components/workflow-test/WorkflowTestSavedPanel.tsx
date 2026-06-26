@@ -8,9 +8,10 @@ import {
   type SavedWorkflowTest,
   type WorkflowTestCompletePayload,
   type WorkflowTestDetail,
+  type WorkflowTestGroupRecord,
 } from "../../api";
 import { useWorkflowTestRunner } from "../../context/WorkflowTestRunnerContext";
-import { groupsToFormInput } from "../../lib/workflowTestGroups";
+import { getFailuresGroup, groupsToFormInput } from "../../lib/workflowTestGroups";
 import type { StressTestGroupInput } from "../../lib/parseQueryGroups";
 import { cn } from "../../lib/cn";
 import { Badge } from "../ui/Badge";
@@ -25,6 +26,7 @@ interface Props {
   onLoadTest: (data: {
     testName: string;
     groups: StressTestGroupInput[];
+    failuresGroup: WorkflowTestGroupRecord | null;
     dryRun: boolean;
     delayMs: number;
   }) => void;
@@ -58,7 +60,7 @@ export function WorkflowTestSavedPanel({
   const [deleteTarget, setDeleteTarget] = useState<SavedWorkflowTest | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [loadingRunId, setLoadingRunId] = useState<string | null>(null);
-  const { run, running: runnerActive } = useWorkflowTestRunner();
+  const { run, runGroup, running: runnerActive } = useWorkflowTestRunner();
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -112,15 +114,31 @@ export function WorkflowTestSavedPanel({
     onLoadTest({
       testName: test.name,
       groups: groupsToFormInput(test.groups),
+      failuresGroup: getFailuresGroup(test.groups) ?? null,
       dryRun: test.dryRun,
       delayMs: test.delayMs,
     });
   }
 
   async function handleRerun(test: SavedWorkflowTest) {
+    const manualGroups = test.groups
+      .filter((group) => group.kind === "manual")
+      .map((group) => ({ name: group.name, queries: group.queries }));
+
     await run({
       testName: test.name,
-      groups: test.groups,
+      groups: manualGroups,
+      dryRun: test.dryRun,
+      delayMs: test.delayMs,
+    });
+  }
+
+  async function handleRunFailures(test: SavedWorkflowTest) {
+    const failures = getFailuresGroup(test.groups);
+    if (!failures || failures.queries.length === 0) return;
+
+    await runGroup(test.id, failures.id, {
+      testName: test.name,
       dryRun: test.dryRun,
       delayMs: test.delayMs,
     });
@@ -228,6 +246,8 @@ export function WorkflowTestSavedPanel({
             const expanded = expandedId === test.id;
             const detail = detailById[test.id];
             const runs = detail?.runs ?? [];
+            const failures = getFailuresGroup(test.groups);
+            const failuresCount = failures?.queries.length ?? 0;
 
             return (
               <div
@@ -257,7 +277,9 @@ export function WorkflowTestSavedPanel({
                           )}
                         </span>
                         <span className="mt-1 block text-xs text-muted-foreground">
-                          {test.groups.length} group(s) · {test.runCount} run(s)
+                          {test.groups.filter((g) => g.kind === "manual").length} manual
+                          group(s) · {failuresCount} failure
+                          {failuresCount === 1 ? "" : "s"} · {test.runCount} run(s)
                           {test.lastRun && (
                             <>
                               {" "}
@@ -282,8 +304,19 @@ export function WorkflowTestSavedPanel({
                         onClick={() => void handleRerun(test)}
                       >
                         <RotateCcw className="h-3.5 w-3.5" />
-                        Rerun
+                        Run all
                       </Button>
+                      {failuresCount > 0 && (
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="secondary"
+                          disabled={disabled || runnerActive}
+                          onClick={() => void handleRunFailures(test)}
+                        >
+                          Run failures
+                        </Button>
+                      )}
                       <Button
                         type="button"
                         size="sm"

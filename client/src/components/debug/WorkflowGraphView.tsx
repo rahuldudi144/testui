@@ -2,7 +2,7 @@ import { forwardRef, useCallback, useEffect, useLayoutEffect, useMemo, useRef, u
 import { ArrowRight, CheckCircle2, Circle, XCircle } from "lucide-react";
 import { cn } from "../../lib/cn";
 import { Badge } from "../ui/Badge";
-import { formatStateFieldValue } from "./formatStateValue";
+import { StateValueView } from "./StateValueView";
 
 export type NodeRunStatus = "success" | "failed" | "skipped" | "pending";
 
@@ -45,13 +45,17 @@ export interface WorkflowGraphData {
 const NODE_LAYOUT: Record<string, { row: number; col: number }> = {
   planner: { row: 0, col: 1 },
   schemaResolver: { row: 1, col: 1 },
-  buildQuery: { row: 2, col: 1 },
-  validateQuery: { row: 3, col: 1 },
-  runQuery: { row: 4, col: 2 },
-  formatResponse: { row: 5, col: 1 },
-  verifyAnswer: { row: 6, col: 1 },
+  graphBuilder: { row: 2, col: 1 },
+  entityExtractor: { row: 3, col: 1 },
+  pathFinder: { row: 4, col: 1 },
+  operationPlanner: { row: 5, col: 1 },
+  buildQuery: { row: 6, col: 1 },
+  validateQuery: { row: 7, col: 1 },
+  runQuery: { row: 8, col: 2 },
+  repairQuery: { row: 8, col: 0 },
+  formatResponse: { row: 9, col: 1 },
   /** Terminal / failure path */
-  answer: { row: 7, col: 0 },
+  answer: { row: 10, col: 0 },
 };
 
 /** Retry / branch edges — drawn as curves so they don't overlap forward paths. */
@@ -59,10 +63,9 @@ const CURVED_EDGE_KEYS = new Set([
   "planner->answer",
   "validateQuery->buildQuery",
   "validateQuery->answer",
-  "runQuery->buildQuery",
+  "runQuery->repairQuery",
   "runQuery->answer",
-  "verifyAnswer->buildQuery",
-  "verifyAnswer->answer",
+  "repairQuery->validateQuery",
 ]);
 
 function shouldUseCurvedEdge(
@@ -95,10 +98,6 @@ function StatusIcon({ status }: { status: NodeRunStatus }) {
   return <Circle className="h-3.5 w-3.5 text-muted-foreground/50" aria-hidden />;
 }
 
-function formatStateValue(key: string, value: unknown): string {
-  return formatStateFieldValue(key, value);
-}
-
 function curvedPath(
   from: { x: number; y: number },
   to: { x: number; y: number },
@@ -107,8 +106,7 @@ function curvedPath(
   if (
     edgeKey === "validateQuery->answer" ||
     edgeKey === "runQuery->answer" ||
-    edgeKey === "planner->answer" ||
-    edgeKey === "verifyAnswer->answer"
+    edgeKey === "planner->answer"
   ) {
     const laneX = Math.min(from.x, to.x) - 36;
     return `M ${from.x} ${from.y} C ${laneX} ${from.y}, ${laneX} ${to.y}, ${to.x} ${to.y}`;
@@ -425,9 +423,9 @@ function StatePanel({
               className="rounded-md border border-border/60 bg-muted/20 px-2 py-1.5"
             >
               <p className="text-[10px] font-medium text-muted-foreground">{key}</p>
-              <p className="mt-0.5 break-all font-mono text-[11px] text-foreground">
-                {formatStateValue(key, value)}
-              </p>
+              <div className="mt-0.5">
+                <StateValueView fieldKey={key} value={value} compact />
+              </div>
             </div>
           ))}
         </div>
@@ -603,7 +601,7 @@ export function WorkflowGraphView({ graph }: Props) {
           className="relative grid gap-3"
           style={{
             gridTemplateColumns: "repeat(3, minmax(0, 1fr))",
-            gridTemplateRows: "repeat(8, auto)",
+            gridTemplateRows: "repeat(11, auto)",
           }}
         >
           {graph.nodes.map((node) => (
@@ -737,22 +735,30 @@ export function parseGraphFromDebug(
     "planner",
     "answer",
     "schemaResolver",
+    "graphBuilder",
+    "entityExtractor",
+    "pathFinder",
+    "operationPlanner",
     "buildQuery",
     "validateQuery",
     "runQuery",
+    "repairQuery",
     "formatResponse",
-    "verifyAnswer",
   ] as const;
 
   const labels: Record<string, string> = {
     planner: "Planner",
     answer: "Answer",
     schemaResolver: "Schema resolver",
+    graphBuilder: "Relationship graph",
+    entityExtractor: "Entity extractor",
+    pathFinder: "Path finder",
+    operationPlanner: "Operation planner",
     buildQuery: "Build query",
     validateQuery: "Validate query",
     runQuery: "Run query",
+    repairQuery: "Repair query",
     formatResponse: "Format response",
-    verifyAnswer: "Verify answer",
   };
 
   const pathSet = new Set(path);
@@ -804,18 +810,20 @@ export function parseGraphFromDebug(
 const FALLBACK_EDGES: Array<{ from: string; to: string; label?: string }> = [
   { from: "planner", to: "answer", label: "non-SQL / off-domain" },
   { from: "planner", to: "schemaResolver", label: "domain + SQL" },
-  { from: "schemaResolver", to: "buildQuery" },
+  { from: "schemaResolver", to: "graphBuilder" },
+  { from: "graphBuilder", to: "entityExtractor" },
+  { from: "entityExtractor", to: "pathFinder" },
+  { from: "pathFinder", to: "operationPlanner" },
+  { from: "operationPlanner", to: "buildQuery" },
   { from: "buildQuery", to: "validateQuery" },
   { from: "validateQuery", to: "runQuery", label: "valid" },
   { from: "validateQuery", to: "formatResponse", label: "dry run" },
   { from: "validateQuery", to: "buildQuery", label: "validation retry" },
   { from: "validateQuery", to: "answer", label: "validation exhausted" },
   { from: "runQuery", to: "formatResponse", label: "success" },
-  { from: "runQuery", to: "buildQuery", label: "execution retry" },
+  { from: "runQuery", to: "repairQuery", label: "execution retry" },
   { from: "runQuery", to: "answer", label: "execution exhausted" },
-  { from: "formatResponse", to: "verifyAnswer" },
-  { from: "verifyAnswer", to: "buildQuery", label: "answer retry" },
-  { from: "verifyAnswer", to: "answer", label: "verification exhausted" },
+  { from: "repairQuery", to: "validateQuery", label: "re-validate" },
 ];
 
 function edgesFromPath(path: string[]): WorkflowGraphEdge[] {

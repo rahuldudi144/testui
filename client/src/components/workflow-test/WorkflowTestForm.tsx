@@ -1,9 +1,11 @@
 import { Plus, Trash2 } from "lucide-react";
+import type { WorkflowTestGroupRecord } from "../../api";
 import {
   countQueriesInGroups,
   parseQueries,
   type StressTestGroupInput,
 } from "../../lib/parseQueryGroups";
+import { Badge } from "../ui/Badge";
 import { Button } from "../ui/Button";
 import { FormField } from "../ui/FormField";
 import { Input } from "../ui/Input";
@@ -19,6 +21,7 @@ interface Props {
   onDryRunChange: (value: boolean) => void;
   delayMs: number;
   onDelayMsChange: (value: number) => void;
+  failuresGroup?: WorkflowTestGroupRecord | null;
   disabled?: boolean;
 }
 
@@ -35,6 +38,7 @@ export function WorkflowTestForm({
   onDryRunChange,
   delayMs,
   onDelayMsChange,
+  failuresGroup,
   disabled,
 }: Props) {
   const totalQueries = countQueriesInGroups(groups);
@@ -136,6 +140,32 @@ export function WorkflowTestForm({
           );
         })}
       </div>
+
+      {failuresGroup && (
+        <div className="space-y-3 rounded-lg border border-dashed border-destructive/40 bg-destructive/5 p-4">
+          <div className="flex flex-wrap items-center gap-2">
+            <Label className="mb-0">{failuresGroup.name}</Label>
+            <Badge variant="destructive" className="normal-case">
+              Failures
+            </Badge>
+            <span className="text-xs text-muted-foreground">
+              {failuresGroup.queries.length}{" "}
+              {failuresGroup.queries.length === 1 ? "query" : "queries"}
+            </span>
+          </div>
+          <p className="text-xs text-muted-foreground">
+            Saved from failed runs. Import failures from a report, then run this
+            group separately.
+          </p>
+          {failuresGroup.queries.length > 0 ? (
+            <pre className="max-h-48 overflow-auto rounded-md border border-border bg-muted/30 p-3 text-xs leading-relaxed whitespace-pre-wrap">
+              {failuresGroup.queries.join("\n")}
+            </pre>
+          ) : (
+            <p className="text-sm text-muted-foreground">No failed queries saved yet.</p>
+          )}
+        </div>
+      )}
 
       <div className="flex flex-wrap items-center gap-6 rounded-lg border border-border bg-muted/20 px-4 py-3">
         <label className="flex items-center gap-2 text-sm text-foreground">

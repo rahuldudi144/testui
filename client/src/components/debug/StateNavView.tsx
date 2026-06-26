@@ -3,7 +3,7 @@ import { cn } from "../../lib/cn";
 import { Badge } from "../ui/Badge";
 import { EmptyState } from "../ui/EmptyState";
 import { Bug } from "lucide-react";
-import { formatStateFieldValue } from "./formatStateValue";
+import { StateValueView } from "./StateValueView";
 
 export interface StateTimelineStep {
   step: number;
@@ -18,11 +18,15 @@ const NODE_LABELS: Record<string, string> = {
   planner: "Planner",
   answer: "Answer",
   schemaResolver: "Schema resolver",
+  graphBuilder: "Relationship graph",
+  entityExtractor: "Entity extractor",
+  pathFinder: "Path finder",
+  operationPlanner: "Operation planner",
   buildQuery: "Build query",
   validateQuery: "Validate query",
   runQuery: "Run query",
+  repairQuery: "Repair query",
   formatResponse: "Format response",
-  verifyAnswer: "Verify answer",
 };
 
 function buildStepsFromHistory(
@@ -267,9 +271,9 @@ export function StateNavView({ steps }: Props) {
               {changeKeys.map((key) => (
                 <div key={key} className="rounded-md bg-muted/20 px-2 py-1.5">
                   <p className="text-[10px] font-medium text-muted-foreground">{key}</p>
-                  <pre className="mt-0.5 wrap-break-word whitespace-pre-wrap font-mono text-[11px] text-foreground">
-                    {formatStateFieldValue(key, activeStep.changes?.[key])}
-                  </pre>
+                  <div className="mt-0.5">
+                    <StateValueView fieldKey={key} value={activeStep.changes?.[key]} compact />
+                  </div>
                 </div>
               ))}
             </div>
@@ -309,9 +313,10 @@ export function StateNavView({ steps }: Props) {
                   <span className="ml-2 normal-case text-info">changed this step</span>
                 )}
               </p>
-              <pre className="mt-2 wrap-break-word whitespace-pre-wrap font-mono text-[11px] leading-relaxed text-foreground">
-                {formatStateFieldValue(selectedKey, activeStep.snapshot[selectedKey])}
-              </pre>
+              <StateValueView
+                fieldKey={selectedKey}
+                value={activeStep.snapshot[selectedKey]}
+              />
             </div>
           ) : (
             <p className="text-xs text-muted-foreground">Select a state field.</p>

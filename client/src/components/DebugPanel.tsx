@@ -14,6 +14,16 @@ import {
   parseStateTimelineFromDebug,
   StateNavView,
 } from "./debug/StateNavView";
+import { parseRelationshipGraphFromDebug } from "./debug/relationshipGraph";
+import { RelationshipGraphView } from "./debug/RelationshipGraphView";
+import {
+  parseEntitiesFromDebug,
+  parseJoinPathsFromDebug,
+  parseOperationsFromDebug,
+} from "./debug/nodeDebugState";
+import { EntitiesView } from "./debug/EntitiesView";
+import { JoinPathsView } from "./debug/JoinPathsView";
+import { OperationsView } from "./debug/OperationsView";
 import { StreamEventsView } from "./debug/StreamEventsView";
 import type { AgentEvent } from "../types/agentEvents";
 import { isAgentEvent } from "../types/agentEvents";
@@ -161,6 +171,22 @@ export function DebugPanel({
   const totals = useMemo(() => asRecord(metrics?.totals), [metrics]);
   const graph = useMemo(
     () => (lastDebug ? parseGraphFromDebug(lastDebug) : null),
+    [lastDebug],
+  );
+  const relationshipGraph = useMemo(
+    () => (lastDebug ? parseRelationshipGraphFromDebug(lastDebug) : null),
+    [lastDebug],
+  );
+  const joinPaths = useMemo(
+    () => (lastDebug ? parseJoinPathsFromDebug(lastDebug) : null),
+    [lastDebug],
+  );
+  const operations = useMemo(
+    () => (lastDebug ? parseOperationsFromDebug(lastDebug) : null),
+    [lastDebug],
+  );
+  const entities = useMemo(
+    () => (lastDebug ? parseEntitiesFromDebug(lastDebug) : null),
     [lastDebug],
   );
   const stateTimeline = useMemo(
@@ -736,13 +762,37 @@ export function DebugPanel({
             )}
           </TabsContent>
 
-          <TabsContent value="graph" className={DEBUG_TAB_SCROLL}>
+          <TabsContent value="graph" className={cn(DEBUG_TAB_SCROLL, "space-y-4")}>
             {!lastDebug ? (
               <p className="text-xs text-muted-foreground">
                 Graph available after the run completes.
               </p>
             ) : graph ? (
-              <WorkflowGraphView graph={graph} />
+              <>
+                {relationshipGraph && (
+                  <Section title="Relationship graph · graphBuilder">
+                    <RelationshipGraphView graph={relationshipGraph} />
+                  </Section>
+                )}
+                {entities && (
+                  <Section title="Entities · entityExtractor">
+                    <EntitiesView entities={entities} />
+                  </Section>
+                )}
+                {joinPaths && (
+                  <Section title="Join paths · pathFinder">
+                    <JoinPathsView joinPaths={joinPaths} />
+                  </Section>
+                )}
+                {operations && (
+                  <Section title="Operations · operationPlanner">
+                    <OperationsView operations={operations} />
+                  </Section>
+                )}
+                <Section title="Workflow graph">
+                  <WorkflowGraphView graph={graph} />
+                </Section>
+              </>
             ) : (
               <EmptyState
                 icon={Bug}

@@ -1,9 +1,14 @@
 export type GraphNodeName =
   | "planner"
   | "schemaResolver"
+  | "graphBuilder"
+  | "entityExtractor"
+  | "pathFinder"
+  | "operationPlanner"
   | "buildQuery"
   | "validateQuery"
   | "runQuery"
+  | "repairQuery"
   | "formatResponse"
   | "answer";
 

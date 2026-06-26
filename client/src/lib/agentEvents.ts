@@ -2,9 +2,14 @@
 export type GraphNodeName =
   | "planner"
   | "schemaResolver"
+  | "graphBuilder"
+  | "entityExtractor"
+  | "pathFinder"
+  | "operationPlanner"
   | "buildQuery"
   | "validateQuery"
   | "runQuery"
+  | "repairQuery"
   | "formatResponse"
   | "answer";
 
@@ -15,7 +20,6 @@ export type AgentStreamEvent =
   | { type: "sql_generated"; sql: string }
   | { type: "validation_failed"; errors: string[] }
   | { type: "query_executed"; rowCount: number }
-  | { type: "answer_verification"; answered: boolean }
   | { type: "token"; content: string }
   | { type: "debug"; name: string; data: unknown }
   | { type: "error"; message: string; code?: string }
@@ -32,7 +36,6 @@ export type AgentProgress = {
   statusMessage: string | null;
   validationErrors: string[] | null;
   rowCount: number | null;
-  answerRetrying: boolean;
 };
 
 export const INITIAL_AGENT_PROGRESS: AgentProgress = {
@@ -41,7 +44,6 @@ export const INITIAL_AGENT_PROGRESS: AgentProgress = {
   statusMessage: null,
   validationErrors: null,
   rowCount: null,
-  answerRetrying: false,
 };
 
 export function reduceAgentEvent(
@@ -54,7 +56,9 @@ export function reduceAgentEvent(
         ...state,
         activeNode: event.node,
         validationErrors:
-          event.node === "buildQuery" || event.node === "validateQuery"
+          event.node === "buildQuery" ||
+          event.node === "validateQuery" ||
+          event.node === "repairQuery"
             ? null
             : state.validationErrors,
       };
@@ -73,11 +77,6 @@ export function reduceAgentEvent(
       return { ...state, validationErrors: event.errors };
     case "query_executed":
       return { ...state, rowCount: event.rowCount };
-    case "answer_verification":
-      return {
-        ...state,
-        answerRetrying: !event.answered,
-      };
     default:
       return state;
   }
@@ -87,9 +86,14 @@ export function reduceAgentEvent(
 const NODE_LABELS: Record<GraphNodeName, string> = {
   planner: "Planning",
   schemaResolver: "Loading schema",
+  graphBuilder: "Building relationship graph",
+  entityExtractor: "Identifying entities",
+  pathFinder: "Finding join paths",
+  operationPlanner: "Planning operations",
   buildQuery: "Generating SQL",
   validateQuery: "Validating SQL",
   runQuery: "Executing query",
+  repairQuery: "Repairing SQL",
   formatResponse: "Formatting response",
   answer: "Answering",
 };

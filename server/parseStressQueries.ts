@@ -3,6 +3,16 @@ export interface StressTestGroup {
   queries: string[];
 }
 
+export type WorkflowTestGroupKind = "manual" | "failures";
+
+export interface WorkflowTestGroupRecord {
+  id: string;
+  name: string;
+  kind: WorkflowTestGroupKind;
+  sortOrder: number;
+  queries: string[];
+}
+
 export function parseQueries(text: string): string[] {
   const seen = new Set<string>();
   const result: string[] = [];
@@ -48,5 +58,22 @@ export function flattenGroups(groups: StressTestGroup[]): Array<{
       items.push({ groupName: group.name, query });
     }
   }
+  return items;
+}
+
+export function flattenGroupRecords(
+  groups: WorkflowTestGroupRecord[],
+  groupIds?: string[],
+): Array<{ groupId: string; groupName: string; query: string }> {
+  const idSet = groupIds?.length ? new Set(groupIds) : null;
+  const items: Array<{ groupId: string; groupName: string; query: string }> = [];
+
+  for (const group of groups) {
+    if (idSet && !idSet.has(group.id)) continue;
+    for (const query of group.queries) {
+      items.push({ groupId: group.id, groupName: group.name, query });
+    }
+  }
+
   return items;
 }
