@@ -37,7 +37,7 @@ import type { ObservabilityContext } from "../../observability/types.js";
 import { loggerFromStructured } from "../../utils/logger.js";
 import type { Logger } from "../../utils/logger.js";
 import { AgentError, errorMessage } from "../../utils/errors.js";
-import { resolveSystemPrompt } from "../../utils/resolveSystemPrompt.js";
+import { resolveInvocationSystemPrompt } from "../../prompts/composeSystemMessage.js";
 import { extractText } from "../../nodes/shared.js";
 import { buildConfig, createAgent } from "./agent.js";
 import type { AgentConfigOverrides } from "./agent.js";
@@ -276,12 +276,12 @@ class AgentRunner {
     return {
       query: input.query,
       messages: input.messages ?? [],
-      systemPrompt: resolveSystemPrompt({
-        base: this.config.systemPrompt,
-        businessContext: input.businessContext,
-        override: input.systemPromptOverride,
-      }),
+      systemPrompt: resolveInvocationSystemPrompt(
+        this.config.systemPrompt,
+        input.systemPrompt,
+      ),
       businessContext: input.businessContext,
+      systemPromptMode: input.systemPromptMode ?? "append",
       dbMetadata: input.dbMetadata,
       dryRun: input.dryRun ?? false,
     };
