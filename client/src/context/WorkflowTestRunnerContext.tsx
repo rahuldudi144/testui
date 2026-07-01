@@ -8,6 +8,7 @@ import {
   type ReactNode,
 } from "react";
 import {
+  rerunWorkflowTestFailures,
   runWorkflowTest,
   runWorkflowTestGroup,
   type QueryRunResult,
@@ -48,6 +49,10 @@ interface WorkflowTestRunnerContextValue {
     options: { testName: string; dryRun: boolean; delayMs: number },
   ) => Promise<void>;
   rerun: () => Promise<void>;
+  rerunFailuresInReport: (
+    runId: string,
+    options: { testName: string; dryRun: boolean; delayMs: number },
+  ) => Promise<void>;
   cancel: () => void;
   clearError: () => void;
   dismissCompletedBanner: () => void;
@@ -129,12 +134,14 @@ export function WorkflowTestRunnerProvider({
   const [showCompletedBanner, setShowCompletedBanner] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
 
-  const beginRun = useCallback(() => {
+  const beginRun = useCallback((options?: { keepReport?: boolean }) => {
     setError(null);
     setRunning(true);
     setShowCompletedBanner(false);
     setLiveResults([]);
-    setReport(null);
+    if (!options?.keepReport) {
+      setReport(null);
+    }
     setProgress(initialProgress);
 
     const controller = new AbortController();
@@ -258,6 +265,51 @@ export function WorkflowTestRunnerProvider({
     await run(lastConfig);
   }, [lastConfig, run]);
 
+  const rerunFailuresInReport = useCallback(
+    async (
+      runId: string,
+      options: { testName: string; dryRun: boolean; delayMs: number },
+    ) => {
+      if (running) {
+        setError("A workflow test is already running.");
+        return;
+      }
+      if (!dbConfigured) {
+        setError("Configure a database connection before running workflow tests.");
+        return;
+      }
+
+      setTestName(options.testName);
+      const controller = beginRun({ keepReport: true });
+
+      try {
+        await rerunWorkflowTestFailures(
+          runId,
+          { dryRun: options.dryRun, delayMs: options.delayMs },
+          createStreamHandlers(
+            setTestId,
+            setProgress,
+            setLiveResults,
+            setReport,
+            setShowCompletedBanner,
+            setSavedRefreshToken,
+            setError,
+          ),
+          controller.signal,
+        );
+      } catch (err) {
+        if (!controller.signal.aborted) {
+          setError(
+            err instanceof Error ? err.message : "Failed to rerun failures in report.",
+          );
+        }
+      } finally {
+        finishRun(controller);
+      }
+    },
+    [beginRun, dbConfigured, finishRun, running],
+  );
+
   const cancel = useCallback(() => {
     abortRef.current?.abort();
   }, []);
@@ -283,6 +335,7 @@ export function WorkflowTestRunnerProvider({
       run,
       runGroup,
       rerun,
+      rerunFailuresInReport,
       cancel,
       clearError,
       dismissCompletedBanner,
@@ -302,6 +355,7 @@ export function WorkflowTestRunnerProvider({
       run,
       runGroup,
       rerun,
+      rerunFailuresInReport,
       cancel,
       clearError,
       dismissCompletedBanner,

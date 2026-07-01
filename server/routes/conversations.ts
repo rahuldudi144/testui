@@ -24,6 +24,10 @@ import {
   isDefaultConversationTitle,
 } from "../conversationTitle.js";
 import { authMiddleware } from "./auth.js";
+import {
+  extractMetricsFromMessageDebug,
+} from "../extractRunMetrics.js";
+import { insertChatQueryExecution } from "../queryExecution.js";
 
 type AuthUser = { id: string; username: string; createdAt: Date };
 
@@ -39,6 +43,23 @@ function startStreamKeepAlive(
   return setInterval(() => {
     void stream.writeSSE({ event: "ping", data: "{}" });
   }, STREAM_KEEPALIVE_MS);
+}
+
+async function recordChatExecution(
+  userId: string,
+  messageId: string,
+  query: string,
+  debugData: unknown,
+  requestId: string,
+): Promise<void> {
+  const metrics = extractMetricsFromMessageDebug(debugData);
+  await insertChatQueryExecution({
+    userId,
+    messageId,
+    query,
+    metrics,
+    requestId,
+  });
 }
 
 export const conversationRoutes = new Hono<{ Variables: { user: AuthUser } }>();
@@ -272,7 +293,7 @@ conversationRoutes.post("/:id/messages", async (c) => {
           { generatedSql, stateHistory },
         );
 
-        await prisma.message.create({
+        const assistantMessage = await prisma.message.create({
           data: {
             conversationId,
             role: "assistant",
@@ -281,6 +302,14 @@ conversationRoutes.post("/:id/messages", async (c) => {
             debugData: debug,
           },
         });
+
+        await recordChatExecution(
+          user.id,
+          assistantMessage.id,
+          query,
+          debug,
+          requestId,
+        );
 
         const title = isDefaultConversationTitle(conversation.title)
           ? await generateConversationTitle(
@@ -418,7 +447,7 @@ conversationRoutes.post("/:id/messages", async (c) => {
         { generatedSql, stateHistory, streamEvents: collectedEvents, ...tokenTotals },
       );
 
-      await prisma.message.create({
+      const assistantMessage = await prisma.message.create({
         data: {
           conversationId,
           role: "assistant",
@@ -427,6 +456,14 @@ conversationRoutes.post("/:id/messages", async (c) => {
           debugData: debugPayload,
         },
       });
+
+      await recordChatExecution(
+        user.id,
+        assistantMessage.id,
+        query,
+        debugPayload,
+        requestId,
+      );
 
       const title = isDefaultConversationTitle(conversation.title)
         ? await generateConversationTitle(

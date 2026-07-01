@@ -14,10 +14,14 @@ export interface FlatGraphEdge extends GraphEdge {
   fromTableKey: string;
 }
 
-export function isRelationshipGraph(value: unknown): value is RelationshipGraph {
+export function isRelationshipGraph(
+  value: unknown,
+): value is RelationshipGraph {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
 
-  for (const [table, edges] of Object.entries(value as Record<string, unknown>)) {
+  for (const [table, edges] of Object.entries(
+    value as Record<string, unknown>,
+  )) {
     if (typeof table !== "string" || !Array.isArray(edges)) return false;
     for (const edge of edges) {
       if (!isGraphEdge(edge)) return false;
@@ -38,7 +42,9 @@ function isGraphEdge(value: unknown): value is GraphEdge {
   );
 }
 
-export function flattenRelationshipGraph(graph: RelationshipGraph): FlatGraphEdge[] {
+export function flattenRelationshipGraph(
+  graph: RelationshipGraph,
+): FlatGraphEdge[] {
   const rows: FlatGraphEdge[] = [];
 
   for (const [fromTableKey, edges] of Object.entries(graph)) {
@@ -77,8 +83,49 @@ export function relationshipGraphStats(graph: RelationshipGraph): {
   return { tableCount: tables.size, edgeCount };
 }
 
+export interface RelationshipTreeRoot {
+  table: string;
+  edges: GraphEdge[];
+}
+
+/** Source tables with outgoing FK edges, sorted for tree display. */
+export function buildRelationshipTreeRoots(
+  graph: RelationshipGraph,
+): RelationshipTreeRoot[] {
+  return Object.entries(graph)
+    .filter(([, edges]) => edges.length > 0)
+    .map(([table, edges]) => ({
+      table,
+      edges: [...edges].sort((a, b) => {
+        const toCmp = a.toTable.localeCompare(b.toTable);
+        if (toCmp !== 0) return toCmp;
+        return a.fromColumn.localeCompare(b.fromColumn);
+      }),
+    }))
+    .sort((a, b) => a.table.localeCompare(b.table));
+}
+
+/** Tables referenced by FKs but with no outgoing edges in this graph. */
+export function referencedOnlyTables(graph: RelationshipGraph): string[] {
+  const sources = new Set(Object.keys(graph));
+  const targets = new Set<string>();
+
+  for (const edges of Object.values(graph)) {
+    for (const edge of edges) {
+      targets.add(edge.toTable);
+    }
+  }
+
+  return [...targets].filter((table) => !sources.has(table)).sort();
+}
+
 export function parseRelationshipGraphFromDebug(
   debug: Record<string, unknown>,
 ): RelationshipGraph | null {
-  return parseNodeFieldFromDebug(debug, "graphBuilder", "graph", isRelationshipGraph);
+  return parseNodeFieldFromDebug(
+    debug,
+    "graphBuilder",
+    "graph",
+    isRelationshipGraph,
+  );
 }

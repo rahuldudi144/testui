@@ -1,6 +1,11 @@
 import type { ReactNode } from "react";
 import { cn } from "../../lib/cn";
-import { useResizableWidth } from "../../lib/useResizableWidth";
+import {
+  DEBUG_PANEL_RESIZE,
+  SIDEBAR_RESIZE,
+  useResizableWidth,
+} from "../../lib/useResizableWidth";
+import { ResizeHandle } from "./ResizeHandle";
 import { Sheet } from "../ui/Sheet";
 import { useIsDesktop, useIsTabletUp } from "../../lib/useMediaQuery";
 
@@ -30,7 +35,15 @@ export function AppShell({
 
   const showInlineDebug = isDesktop && showDebug && debugPanel;
   const showDebugSheet = !isDesktop && showDebug && debugPanel;
-  const { width: debugWidth, startResize } = useResizableWidth(!!showInlineDebug);
+  const showInlineSidebar = isTabletUp;
+  const { width: sidebarWidth, startResize: startSidebarResize } = useResizableWidth(
+    showInlineSidebar,
+    SIDEBAR_RESIZE,
+  );
+  const { width: debugWidth, startResize: startDebugResize } = useResizableWidth(
+    !!showInlineDebug,
+    DEBUG_PANEL_RESIZE,
+  );
 
   return (
     <div className="flex h-screen overflow-hidden bg-background">
@@ -39,12 +52,20 @@ export function AppShell({
       </a>
 
       {isTabletUp ? (
-        <nav
-          aria-label="Conversations"
-          className="hidden h-full w-[280px] shrink-0 border-r border-border bg-card md:flex md:flex-col md:overflow-hidden"
-        >
-          {sidebar}
-        </nav>
+        <>
+          <nav
+            aria-label="Conversations"
+            style={{ width: sidebarWidth }}
+            className="hidden h-full shrink-0 border-r border-border bg-card md:flex md:flex-col md:overflow-hidden"
+          >
+            {sidebar}
+          </nav>
+          <ResizeHandle
+            label="Resize sidebar"
+            onPointerDown={startSidebarResize}
+            className="group relative hidden w-1 shrink-0 cursor-col-resize touch-none bg-border/40 md:block"
+          />
+        </>
       ) : (
         <Sheet
           open={sidebarOpen}
@@ -66,16 +87,11 @@ export function AppShell({
 
         {showInlineDebug && (
           <>
-            <div
-              role="separator"
-              aria-orientation="vertical"
-              aria-label="Resize debug panel"
-              onPointerDown={startResize}
+            <ResizeHandle
+              label="Resize debug panel"
+              onPointerDown={startDebugResize}
               className="group relative hidden w-1 shrink-0 cursor-col-resize touch-none bg-border/40 xl:block"
-            >
-              <div className="absolute inset-y-0 -left-1.5 -right-1.5" />
-              <div className="absolute inset-y-0 left-0 w-px bg-border transition-colors group-hover:bg-primary/50 group-active:bg-primary" />
-            </div>
+            />
             <aside
               aria-label="Debug panel"
               style={{ width: debugWidth }}

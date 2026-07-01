@@ -10,6 +10,7 @@ import {
   parseRelationshipGraphFromDebug,
   relationshipGraphStats,
 } from "../client/src/components/debug/relationshipGraph";
+import { layoutRelationshipGraph } from "../client/src/components/debug/relationshipGraphLayout";
 
 const sampleGraph = {
   Enrollment: [
@@ -93,5 +94,33 @@ describe("relationshipGraph debug helpers", () => {
         stateHistory: [{ step: 2, node: "entityExtractor", changes: { entities } }],
       }),
     ).toEqual(entities);
+  });
+
+  test("layoutRelationshipGraph produces positioned nodes and edges", () => {
+    const layout = layoutRelationshipGraph(sampleGraph);
+    expect(layout.nodes).toHaveLength(3);
+    expect(layout.edges).toHaveLength(2);
+    expect(layout.width).toBeGreaterThan(0);
+    expect(layout.height).toBeGreaterThan(0);
+    for (const node of layout.nodes) {
+      expect(node.width).toBeGreaterThan(0);
+      expect(node.x).toBeGreaterThanOrEqual(0);
+      expect(node.y).toBeGreaterThanOrEqual(0);
+    }
+
+    const byLayer = new Map<number, typeof layout.nodes>();
+    for (const node of layout.nodes) {
+      const list = byLayer.get(node.layer) ?? [];
+      list.push(node);
+      byLayer.set(node.layer, list);
+    }
+    for (const layerNodes of byLayer.values()) {
+      const sorted = [...layerNodes].sort((a, b) => a.x - b.x);
+      for (let i = 1; i < sorted.length; i++) {
+        const prev = sorted[i - 1]!;
+        const current = sorted[i]!;
+        expect(current.x).toBeGreaterThanOrEqual(prev.x + prev.width + 8);
+      }
+    }
   });
 });

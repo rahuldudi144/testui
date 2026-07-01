@@ -20,12 +20,13 @@ import { WorkflowTestForm } from "./workflow-test/WorkflowTestForm";
 import { WorkflowTestJsonImport } from "./workflow-test/WorkflowTestJsonImport";
 import { WorkflowTestProgress } from "./workflow-test/WorkflowTestProgress";
 import { WorkflowTestReport } from "./workflow-test/WorkflowTestReport";
+import { ObservabilityPage } from "./workflow-test/ObservabilityPage";
 import { WorkflowTestSavedPanel } from "./workflow-test/WorkflowTestSavedPanel";
 import { Alert } from "./ui/Alert";
 import { Button } from "./ui/Button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "./ui/Tabs";
 
-type WorkflowTab = "tests" | "setup" | "report";
+type WorkflowTab = "tests" | "setup" | "report" | "usage";
 
 interface Props {
   onBack: () => void;
@@ -294,6 +295,7 @@ export function WorkflowTestPage({ onBack, dbConfigured, onOpenSettings }: Props
             <TabsTrigger value="report" disabled={!report}>
               Report{report ? ` (${report.results.length})` : ""}
             </TabsTrigger>
+            <TabsTrigger value="usage">Usage</TabsTrigger>
           </TabsList>
 
           <TabsContent value="tests">
@@ -337,6 +339,10 @@ export function WorkflowTestPage({ onBack, dbConfigured, onOpenSettings }: Props
                 Run a workflow test to see the report.
               </p>
             )}
+          </TabsContent>
+
+          <TabsContent value="usage">
+            <ObservabilityPage />
           </TabsContent>
         </Tabs>
       </div>

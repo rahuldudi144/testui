@@ -7,6 +7,7 @@ import { databaseRoutes } from "./routes/databases.js";
 import { agentRoutes } from "./routes/agents.js";
 import { userRoutes } from "./routes/users.js";
 import { workflowTestRoutes } from "./routes/workflowTest.js";
+import { observabilityRoutes } from "./routes/observability.js";
 import { loadEnv, isProduction } from "./env.js";
 import { getSessionUser } from "./auth.js";
 import path from "path";
@@ -47,6 +48,7 @@ app.route("/api/databases", databaseRoutes);
 app.route("/api/agents", agentRoutes);
 app.route("/api/users", userRoutes);
 app.route("/api/workflow-test", workflowTestRoutes);
+app.route("/api/observability", observabilityRoutes);
 
 if (isProduction()) {
   app.use("/*", serveStatic({ root: distDir }));

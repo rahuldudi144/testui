@@ -34,6 +34,12 @@ export interface QueryRunResult {
   workflowStatus?: string;
   requestId?: string;
   errorMessage?: string;
+  queryKey?: string;
+  attempts?: Array<Record<string, unknown>>;
+  promptTokens?: number;
+  completionTokens?: number;
+  totalTokens?: number;
+  executionCount?: number;
 }
 
 export interface StressTestSummary {
@@ -47,6 +53,11 @@ export interface StressTestSummary {
     string,
     { total: number; passed: number; failed: number; errors: number; plannerSkipped: number }
   >;
+  executionCount?: number;
+  promptTokens?: number;
+  completionTokens?: number;
+  totalTokens?: number;
+  llmCallCount?: number;
 }
 
 interface WorkflowSummary {
@@ -474,6 +485,12 @@ export function buildStressTestSummary(
     byGroup: {},
   };
 
+  let executionCount = 0;
+  let promptTokens = 0;
+  let completionTokens = 0;
+  let totalTokens = 0;
+  let llmCallCount = 0;
+
   for (const result of results) {
     const groupStats = summary.byGroup[result.groupName] ?? {
       total: 0,
@@ -505,7 +522,26 @@ export function buildStressTestSummary(
     }
 
     summary.byGroup[result.groupName] = groupStats;
+
+    executionCount += result.executionCount ?? result.attempts?.length ?? 1;
+    promptTokens += result.promptTokens ?? 0;
+    completionTokens += result.completionTokens ?? 0;
+    totalTokens += result.totalTokens ?? 0;
+    if (Array.isArray(result.attempts)) {
+      for (const attempt of result.attempts) {
+        const calls = attempt.llmCalls;
+        if (Array.isArray(calls)) {
+          llmCallCount += calls.length;
+        }
+      }
+    }
   }
+
+  summary.executionCount = executionCount;
+  summary.promptTokens = promptTokens;
+  summary.completionTokens = completionTokens;
+  summary.totalTokens = totalTokens;
+  summary.llmCallCount = llmCallCount;
 
   return summary;
 }

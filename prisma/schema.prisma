@@ -20,6 +20,7 @@ model User {
   agents           AgentProfile[]       @relation("UserAgents")
   workflowTests    WorkflowTest[]
   workflowTestRuns WorkflowTestRun[]
+  queryExecutions  QueryExecution[]
 }
 
 model AgentProfile {
@@ -71,14 +72,15 @@ model Conversation {
 }
 
 model Message {
-  id             String       @id @default(cuid())
+  id             String           @id @default(cuid())
   conversationId String
-  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  conversation   Conversation     @relation(fields: [conversationId], references: [id], onDelete: Cascade)
   role           String
-  content        String       @db.Text
-  generatedSql   String?      @db.Text
+  content        String           @db.Text
+  generatedSql   String?          @db.Text
   debugData      Json?
-  createdAt      DateTime     @default(now())
+  createdAt      DateTime         @default(now())
+  queryExecution QueryExecution?
 
   @@index([conversationId])
 }
@@ -133,20 +135,55 @@ model WorkflowTestQuery {
 }
 
 model WorkflowTestRun {
-  id             String              @id @default(cuid())
-  userId         String
-  user           User                @relation(fields: [userId], references: [id], onDelete: Cascade)
-  workflowTestId String
-  workflowTest   WorkflowTest        @relation(fields: [workflowTestId], references: [id], onDelete: Cascade)
-  testName       String
-  dryRun         Boolean
-  delayMs        Int
-  database       Json
-  summary        Json
-  results        Json
-  ranAt          DateTime            @default(now())
-  sourcedQueries WorkflowTestQuery[]
+  id              String              @id @default(cuid())
+  userId          String
+  user            User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  workflowTestId  String
+  workflowTest    WorkflowTest        @relation(fields: [workflowTestId], references: [id], onDelete: Cascade)
+  testName        String
+  dryRun          Boolean
+  delayMs         Int
+  database        Json
+  summary         Json
+  results         Json
+  ranAt           DateTime            @default(now())
+  updatedAt       DateTime            @updatedAt
+  sourcedQueries  WorkflowTestQuery[]
+  queryExecutions QueryExecution[]
 
   @@index([userId, ranAt(sort: Desc)])
   @@index([workflowTestId, ranAt(sort: Desc)])
+}
+
+enum QueryExecutionSource {
+  workflow_test
+  chat
+}
+
+model QueryExecution {
+  id                String               @id @default(cuid())
+  userId            String
+  user              User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
+  source            QueryExecutionSource
+  workflowTestRunId String?
+  workflowTestRun   WorkflowTestRun?     @relation(fields: [workflowTestRunId], references: [id], onDelete: Cascade)
+  messageId         String?              @unique
+  message           Message?             @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  queryKey          String?
+  attemptNumber     Int                  @default(1)
+  query             String               @db.Text
+  groupName         String?
+  status            String?
+  promptTokens      Int                  @default(0)
+  completionTokens  Int                  @default(0)
+  totalTokens       Int                  @default(0)
+  llmCallCount      Int                  @default(0)
+  llmCalls          Json?
+  durationMs        Int                  @default(0)
+  requestId         String?
+  ranAt             DateTime             @default(now())
+
+  @@index([userId, ranAt(sort: Desc)])
+  @@index([workflowTestRunId])
+  @@index([messageId])
 }

@@ -420,6 +420,37 @@ export interface FailedNodeResponse {
   state: Record<string, unknown>;
 }
 
+export interface LlmCallUsage {
+  node?: string;
+  promptTokens?: number;
+  completionTokens?: number;
+  totalTokens?: number;
+  latencyMs?: number;
+}
+
+export interface QueryAttempt {
+  attemptNumber: number;
+  kind: "initial" | "rerun";
+  ranAt: string;
+  status: WorkflowRunStatus;
+  durationMs: number;
+  requestId?: string;
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+  llmCalls: LlmCallUsage[];
+  failurePhase: FailurePhase;
+  failedNode?: string;
+  failureState?: Record<string, unknown>;
+  failedNodeResponse?: FailedNodeResponse;
+  generatedSql?: string | null;
+  markdownPreview?: string;
+  markdownResponse?: string;
+  workflowPath?: string[];
+  workflowStatus?: string;
+  errorMessage?: string;
+}
+
 export interface QueryRunResult {
   groupName: string;
   query: string;
@@ -436,6 +467,12 @@ export interface QueryRunResult {
   workflowStatus?: string;
   requestId?: string;
   errorMessage?: string;
+  queryKey?: string;
+  attempts?: QueryAttempt[];
+  promptTokens?: number;
+  completionTokens?: number;
+  totalTokens?: number;
+  executionCount?: number;
 }
 
 export interface WorkflowTestSummary {
@@ -455,6 +492,11 @@ export interface WorkflowTestSummary {
       plannerSkipped: number;
     }
   >;
+  executionCount?: number;
+  promptTokens?: number;
+  completionTokens?: number;
+  totalTokens?: number;
+  llmCallCount?: number;
 }
 
 export interface WorkflowTestCompletePayload {
@@ -663,4 +705,74 @@ export async function getWorkflowTestRun(
 
 export async function deleteWorkflowTest(testId: string): Promise<void> {
   await request(`/api/workflow-test/${testId}`, { method: "DELETE" });
+}
+
+export async function rerunWorkflowTestFailures(
+  runId: string,
+  input: { dryRun?: boolean; delayMs?: number } | undefined,
+  handlers: WorkflowTestHandlers,
+  signal?: AbortSignal,
+): Promise<void> {
+  const res = await fetch(`/api/workflow-test/runs/${runId}/rerun-failures`, {
+    method: "POST",
+    credentials: "include",
+    headers: {
+      "Content-Type": "application/json",
+      Accept: "text/event-stream",
+    },
+    body: JSON.stringify(input ?? {}),
+    signal,
+  });
+
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.error ?? `Request failed (${res.status})`);
+  }
+
+  await consumeWorkflowTestStream(res, handlers);
+}
+
+export interface UsageTotals {
+  executionCount: number;
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+  llmCallCount: number;
+}
+
+export interface RecentExecutionRow {
+  id: string;
+  source: "workflow_test" | "chat";
+  query: string;
+  groupName: string | null;
+  status: string | null;
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+  llmCallCount: number;
+  durationMs: number;
+  attemptNumber: number;
+  ranAt: string;
+  workflowTestRunId: string | null;
+  messageId: string | null;
+}
+
+export interface PlatformUsageResponse {
+  totals: UsageTotals;
+  bySource: {
+    workflow_test: UsageTotals;
+    chat: UsageTotals;
+  };
+  recentExecutions: RecentExecutionRow[];
+}
+
+export async function getPlatformUsage(params?: {
+  from?: string;
+  to?: string;
+}): Promise<PlatformUsageResponse> {
+  const search = new URLSearchParams();
+  if (params?.from) search.set("from", params.from);
+  if (params?.to) search.set("to", params.to);
+  const query = search.toString();
+  return request(`/api/observability/usage${query ? `?${query}` : ""}`);
 }

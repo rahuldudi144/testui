@@ -1,6 +1,6 @@
 import { Fragment, useEffect, useMemo, useState } from "react";
 import { ChevronDown, ChevronRight, Download, RotateCcw, Save } from "lucide-react";
-import type { QueryRunResult, WorkflowTestCompletePayload } from "../../api";
+import type { QueryAttempt, QueryRunResult, WorkflowTestCompletePayload } from "../../api";
 import { getWorkflowTest, importWorkflowTestFailures } from "../../api";
 import { useWorkflowTestRunner } from "../../context/WorkflowTestRunnerContext";
 import { getFailuresGroup } from "../../lib/workflowTestGroups";
@@ -43,7 +43,132 @@ function statusLabel(status: QueryRunResult["status"]): string {
   return status;
 }
 
+function formatTokens(value: number | undefined): string {
+  if (value === undefined) return "—";
+  return value.toLocaleString();
+}
+
+function AttemptHistory({ attempts }: { attempts: QueryAttempt[] }) {
+  return (
+    <InspectSection title="Rerun history">
+      <Table>
+        <TableHeader>
+          <TableRow>
+            <TableHead>#</TableHead>
+            <TableHead>Kind</TableHead>
+            <TableHead>Status</TableHead>
+            <TableHead>Ran at</TableHead>
+            <TableHead>Duration</TableHead>
+            <TableHead>Prompt</TableHead>
+            <TableHead>Completion</TableHead>
+            <TableHead>Total</TableHead>
+            <TableHead>LLM calls</TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {attempts.map((attempt) => (
+            <TableRow key={attempt.attemptNumber}>
+              <TableCell>{attempt.attemptNumber}</TableCell>
+              <TableCell className="capitalize">{attempt.kind}</TableCell>
+              <TableCell>
+                <Badge variant={statusVariant(attempt.status)} className="normal-case">
+                  {statusLabel(attempt.status)}
+                </Badge>
+              </TableCell>
+              <TableCell className="text-xs text-muted-foreground">
+                {new Date(attempt.ranAt).toLocaleString()}
+              </TableCell>
+              <TableCell className="tabular-nums text-xs">{attempt.durationMs} ms</TableCell>
+              <TableCell className="tabular-nums text-xs">
+                {formatTokens(attempt.promptTokens)}
+              </TableCell>
+              <TableCell className="tabular-nums text-xs">
+                {formatTokens(attempt.completionTokens)}
+              </TableCell>
+              <TableCell className="tabular-nums text-xs">
+                {formatTokens(attempt.totalTokens)}
+              </TableCell>
+              <TableCell className="tabular-nums text-xs">
+                {attempt.llmCalls.length}
+              </TableCell>
+            </TableRow>
+          ))}
+        </TableBody>
+      </Table>
+
+      {attempts.some((attempt) => attempt.llmCalls.length > 0) && (
+        <div className="mt-4 space-y-3">
+          {attempts.map((attempt) =>
+            attempt.llmCalls.length > 0 ? (
+              <div key={`llm-${attempt.attemptNumber}`}>
+                <p className="mb-2 text-xs font-medium text-muted-foreground">
+                  Attempt {attempt.attemptNumber} — per-node tokens
+                </p>
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Node</TableHead>
+                      <TableHead>Prompt</TableHead>
+                      <TableHead>Completion</TableHead>
+                      <TableHead>Total</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {attempt.llmCalls.map((call, index) => (
+                      <TableRow key={`${attempt.attemptNumber}-${call.node ?? index}`}>
+                        <TableCell className="font-mono text-xs">
+                          {call.node ?? "—"}
+                        </TableCell>
+                        <TableCell className="tabular-nums text-xs">
+                          {formatTokens(call.promptTokens)}
+                        </TableCell>
+                        <TableCell className="tabular-nums text-xs">
+                          {formatTokens(call.completionTokens)}
+                        </TableCell>
+                        <TableCell className="tabular-nums text-xs">
+                          {formatTokens(call.totalTokens)}
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </div>
+            ) : null,
+          )}
+        </div>
+      )}
+    </InspectSection>
+  );
+}
+
 function ResultInspector({ result }: { result: QueryRunResult }) {
+  const attempts =
+    result.attempts ??
+    [
+      {
+        attemptNumber: 1,
+        kind: "initial" as const,
+        ranAt: new Date(0).toISOString(),
+        status: result.status,
+        durationMs: result.durationMs,
+        requestId: result.requestId,
+        promptTokens: result.promptTokens ?? 0,
+        completionTokens: result.completionTokens ?? 0,
+        totalTokens: result.totalTokens ?? 0,
+        llmCalls: [],
+        failurePhase: result.failurePhase,
+        failedNode: result.failedNode,
+        failureState: result.failureState,
+        failedNodeResponse: result.failedNodeResponse,
+        generatedSql: result.generatedSql,
+        markdownPreview: result.markdownPreview,
+        markdownResponse: result.markdownResponse,
+        workflowPath: result.workflowPath,
+        workflowStatus: result.workflowStatus,
+        errorMessage: result.errorMessage,
+      },
+    ];
+
   return (
     <div className="space-y-3 py-2">
       <InspectMetaGrid
@@ -55,10 +180,17 @@ function ResultInspector({ result }: { result: QueryRunResult }) {
           },
           { label: "Failed node", value: result.failedNode ?? "—" },
           { label: "Duration", value: `${result.durationMs} ms` },
+          { label: "Attempts", value: String(result.executionCount ?? attempts.length) },
+          {
+            label: "Total tokens",
+            value: formatTokens(result.totalTokens),
+          },
           { label: "Workflow status", value: result.workflowStatus ?? "—" },
           { label: "Request ID", value: result.requestId ?? "—" },
         ]}
       />
+
+      <AttemptHistory attempts={attempts} />
 
       <InspectSection title="Query">
         <InspectCodeBlock value={result.query} />
@@ -119,7 +251,7 @@ function ResultInspector({ result }: { result: QueryRunResult }) {
 }
 
 export function WorkflowTestReport({ report }: Props) {
-  const { runGroup, running } = useWorkflowTestRunner();
+  const { runGroup, rerunFailuresInReport, running } = useWorkflowTestRunner();
   const [filter, setFilter] = useState<StatusFilter>("all");
   const [expandedKey, setExpandedKey] = useState<string | null>(null);
   const [failuresGroupId, setFailuresGroupId] = useState<string | null>(null);
@@ -165,6 +297,15 @@ export function WorkflowTestReport({ report }: Props) {
     } finally {
       setImporting(false);
     }
+  }
+
+  async function handleRerunInReport() {
+    if (!report.runId) return;
+    await rerunFailuresInReport(report.runId, {
+      testName: report.testName,
+      dryRun: report.dryRun,
+      delayMs: report.delayMs ?? 0,
+    });
   }
 
   async function handleRunFailures() {
@@ -223,6 +364,18 @@ export function WorkflowTestReport({ report }: Props) {
               Save failures to group
             </Button>
           )}
+          {canImport && report.runId && (
+            <Button
+              type="button"
+              variant="secondary"
+              size="sm"
+              disabled={running}
+              onClick={() => void handleRerunInReport()}
+            >
+              <RotateCcw className="h-4 w-4" />
+              Rerun failures in this report
+            </Button>
+          )}
           {failuresGroupId && (
             <Button
               type="button"
@@ -253,6 +406,14 @@ export function WorkflowTestReport({ report }: Props) {
             <Badge variant="destructive">{summary.errors} errors</Badge>
             <Badge variant="outline">{summary.plannerSkipped} planner skip</Badge>
             <Badge variant="info">{summary.total} total</Badge>
+            {summary.executionCount !== undefined && (
+              <Badge variant="outline">{summary.executionCount} executions</Badge>
+            )}
+            {summary.totalTokens !== undefined && (
+              <Badge variant="outline">
+                {formatTokens(summary.totalTokens)} tokens
+              </Badge>
+            )}
           </div>
 
           {Object.keys(summary.byPhase).length > 0 && (
@@ -320,6 +481,8 @@ export function WorkflowTestReport({ report }: Props) {
             <TableHead>Phase</TableHead>
             <TableHead>Failed node</TableHead>
             <TableHead>Duration</TableHead>
+            <TableHead>Attempts</TableHead>
+            <TableHead>Tokens</TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
@@ -362,10 +525,16 @@ export function WorkflowTestReport({ report }: Props) {
                   <TableCell className="tabular-nums text-xs">
                     {result.durationMs} ms
                   </TableCell>
+                  <TableCell className="tabular-nums text-xs">
+                    {result.executionCount ?? result.attempts?.length ?? 1}
+                  </TableCell>
+                  <TableCell className="tabular-nums text-xs">
+                    {formatTokens(result.totalTokens)}
+                  </TableCell>
                 </TableRow>
                 {expanded && (
                   <TableRow className="bg-muted/20">
-                    <TableCell colSpan={7}>
+                    <TableCell colSpan={9}>
                       <ResultInspector result={result} />
                     </TableCell>
                   </TableRow>

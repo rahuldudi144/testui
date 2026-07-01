@@ -39,8 +39,18 @@ function formatSummary(summary: {
   passed: number;
   failed: number;
   errors: number;
+  executionCount?: number;
+  totalTokens?: number;
 }): string {
-  return `${summary.passed} passed, ${summary.failed} failed, ${summary.errors} errors`;
+  const base = `${summary.passed} passed, ${summary.failed} failed, ${summary.errors} errors`;
+  const extras: string[] = [];
+  if (summary.executionCount !== undefined) {
+    extras.push(`${summary.executionCount} executions`);
+  }
+  if (summary.totalTokens !== undefined) {
+    extras.push(`${summary.totalTokens.toLocaleString()} tokens`);
+  }
+  return extras.length > 0 ? `${base} · ${extras.join(" · ")}` : base;
 }
 
 export function WorkflowTestSavedPanel({

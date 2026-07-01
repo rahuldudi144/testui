@@ -1,31 +1,20 @@
-import { randomUUID } from "crypto";
 import type { Prisma } from "@prisma/client";
 import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import { prisma } from "../db.js";
-import { extractSqlFromMarkdown } from "../agent.js";
-import {
-  buildAgentRunContext,
-  buildFullDebugPayload,
-  invokeResultDebugFields,
-} from "../buildDebugPayload.js";
-import { beginRequestDebug } from "../debugCapture.js";
 import { loadEnv } from "../env.js";
-import { invokeWithHistory } from "../runAgentWithHistory.js";
 import {
   flattenGroupRecords,
   normalizeGroups,
   type WorkflowTestGroupRecord,
 } from "../parseStressQueries.js";
 import {
-  analyzeStressRunResult,
   buildStressTestSummary,
   type QueryRunResult,
 } from "../stressTestAnalyze.js";
 import {
   getActiveDatabaseForUser,
   parseDbHost,
-  connectionAgentMetadata,
 } from "../userDatabase.js";
 import { getActiveAgentForUser, profileAgentConfig } from "../userAgent.js";
 import {
@@ -36,6 +25,20 @@ import {
 } from "../workflowTestGroups.js";
 import { authMiddleware } from "./auth.js";
 import { errorMessage } from "../../../utils/errors.js";
+import { extractMetricsFromDebug } from "../extractRunMetrics.js";
+import {
+  collectFailedForRerun,
+  mergeRerunResults,
+  normalizeQueryRunResult,
+  normalizeRunReport,
+  parseStoredResults,
+  parseStoredSummary,
+} from "../workflowTestObservability.js";
+import {
+  executeQueryItem,
+  persistRerunExecutions,
+  persistWorkflowExecutions,
+} from "../workflowTestRunExecutor.js";
 
 type AuthUser = { id: string; username: string; createdAt: Date };
 
@@ -105,6 +108,15 @@ async function executeWorkflowTestRun(
     maxValidationRetries: env.DB_AGENT_MAX_VALIDATION_RETRIES,
   };
 
+  const queryContext = {
+    dbType,
+    activeDb,
+    dbInfo,
+    agentConfig,
+    runnerOptions,
+    dryRun,
+  };
+
   const results: QueryRunResult[] = [];
 
   await stream.writeSSE({
@@ -130,67 +142,10 @@ async function executeWorkflowTestRun(
       }),
     });
 
-    const requestId = randomUUID();
-    const correlationId = `workflow-${randomUUID()}`;
-    beginRequestDebug(requestId, correlationId);
-
-    const startedAt = Date.now();
-    let runResult: QueryRunResult;
-
-    try {
-      const { result, stateHistory } = await invokeWithHistory(
-        dbType,
-        activeDb.dbUri,
-        {
-          query,
-          messages: [],
-          dryRun,
-          requestId,
-          correlationId,
-          ...connectionAgentMetadata(activeDb),
-        },
-        runnerOptions,
-      );
-
-      const generatedSql =
-        result.generatedSql ?? extractSqlFromMarkdown(result.markdownResponse);
-
-      const output = invokeResultDebugFields(result);
-      const runContext = buildAgentRunContext(
-        query,
-        dryRun,
-        [],
-        agentConfig,
-        output,
-      );
-
-      const debug = buildFullDebugPayload(
-        requestId,
-        correlationId,
-        dbInfo,
-        runContext,
-        { generatedSql, stateHistory },
-      );
-
-      runResult = analyzeStressRunResult({
-        query,
-        groupName,
-        result,
-        debug,
-        durationMs: Date.now() - startedAt,
-        dryRun,
-        requestId,
-      });
-    } catch (err) {
-      runResult = analyzeStressRunResult({
-        query,
-        groupName,
-        durationMs: Date.now() - startedAt,
-        dryRun,
-        requestId,
-        errorMessage: errorMessage(err),
-      });
-    }
+    const { result: runResult } = await executeQueryItem(
+      { groupName, query },
+      queryContext,
+    );
 
     results.push(runResult);
 
@@ -221,18 +176,205 @@ async function executeWorkflowTestRun(
     },
   });
 
+  await persistWorkflowExecutions(userId, savedRun.id, results);
+
+  const report = normalizeRunReport({
+    testId,
+    runId: savedRun.id,
+    testName,
+    dryRun,
+    delayMs,
+    database: dbInfo,
+    ranAt: ranAt.toISOString(),
+    summary,
+    results,
+  });
+
   await stream.writeSSE({
     event: "complete",
+    data: JSON.stringify(report),
+  });
+}
+
+async function executeRerunFailuresInRun(
+  runId: string,
+  userId: string,
+  stream: {
+    writeSSE: (message: { event: string; data: string }) => Promise<void>;
+  },
+  options?: { dryRun?: boolean; delayMs?: number },
+): Promise<void> {
+  const existingRun = await prisma.workflowTestRun.findFirst({
+    where: { id: runId, userId },
+  });
+
+  if (!existingRun) {
+    await stream.writeSSE({
+      event: "error",
+      data: JSON.stringify({ message: "Workflow test run not found." }),
+    });
+    return;
+  }
+
+  const existingResults = parseStoredResults(existingRun.results).map(
+    normalizeQueryRunResult,
+  );
+  const failedItems = collectFailedForRerun(existingResults);
+
+  if (failedItems.length === 0) {
+    await stream.writeSSE({
+      event: "error",
+      data: JSON.stringify({
+        message: "No failed or errored queries to rerun in this report.",
+      }),
+    });
+    return;
+  }
+
+  const activeDb = await getActiveDatabaseForUser(userId);
+  if (!activeDb) {
+    await stream.writeSSE({
+      event: "error",
+      data: JSON.stringify({
+        message:
+          "No database configured. Add a PostgreSQL or MySQL connection in Settings.",
+      }),
+    });
+    return;
+  }
+
+  const activeAgent = await getActiveAgentForUser(userId);
+  const runnerOptions = profileAgentConfig(activeAgent);
+
+  const dryRun = options?.dryRun ?? existingRun.dryRun;
+  const delayMs = Math.max(0, options?.delayMs ?? existingRun.delayMs);
+
+  const dbType = activeDb.dbType as "postgres" | "mysql";
+  const dbInfo = existingRun.database as {
+    dbType: string;
+    name: string;
+    host: string;
+  };
+
+  const env = loadEnv();
+  const agentConfig = {
+    provider: runnerOptions.llmProvider ?? env.DB_AGENT_LLM_PROVIDER,
+    model: runnerOptions.modelName ?? env.DB_AGENT_MODEL_NAME,
+    readOnly: env.DB_AGENT_READ_ONLY,
+    maxValidationRetries: env.DB_AGENT_MAX_VALIDATION_RETRIES,
+  };
+
+  const queryContext = {
+    dbType,
+    activeDb,
+    dbInfo: {
+      dbType: activeDb.dbType,
+      name: activeDb.name,
+      host: parseDbHost(activeDb.dbUri),
+    },
+    agentConfig,
+    runnerOptions,
+    dryRun,
+  };
+
+  const previousExecutionCounts = new Map(
+    existingResults.map((result) => [
+      result.queryKey ?? `${result.groupName}::${result.query}`,
+      result.executionCount ?? result.attempts?.length ?? 1,
+    ]),
+  );
+
+  await stream.writeSSE({
+    event: "start",
     data: JSON.stringify({
-      testId,
-      runId: savedRun.id,
-      testName,
+      testName: existingRun.testName,
+      testId: existingRun.workflowTestId,
+      totalQueries: failedItems.length,
       dryRun,
-      database: dbInfo,
-      ranAt: ranAt.toISOString(),
-      summary,
-      results,
+      runId,
+      rerun: true,
     }),
+  });
+
+  const reruns: Array<{
+    queryKey: string;
+    result: QueryRunResult;
+    metrics: ReturnType<typeof extractMetricsFromDebug>;
+    ranAt: Date;
+  }> = [];
+  let workingResults = existingResults;
+
+  for (let index = 0; index < failedItems.length; index += 1) {
+    const item = failedItems[index]!;
+    const queryKey = item.queryKey!;
+
+    await stream.writeSSE({
+      event: "progress",
+      data: JSON.stringify({
+        groupName: item.groupName,
+        queryIndex: index + 1,
+        totalQueries: failedItems.length,
+        query: item.query,
+      }),
+    });
+
+    const { result, metrics, ranAt } = await executeQueryItem(
+      { groupName: item.groupName, query: item.query },
+      queryContext,
+    );
+
+    reruns.push({ queryKey, result, metrics, ranAt });
+    workingResults = mergeRerunResults(workingResults, [
+      { queryKey, result, metrics, ranAt },
+    ]);
+
+    const mergedPreview = workingResults.find((row) => row.queryKey === queryKey);
+
+    await stream.writeSSE({
+      event: "result",
+      data: JSON.stringify(mergedPreview ?? result),
+    });
+
+    if (delayMs > 0 && index < failedItems.length - 1) {
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+  }
+
+  const mergedResults = workingResults;
+  const summary = buildStressTestSummary(mergedResults);
+
+  await prisma.workflowTestRun.update({
+    where: { id: runId },
+    data: {
+      dryRun,
+      delayMs,
+      summary: summary as unknown as Prisma.InputJsonValue,
+      results: mergedResults as unknown as Prisma.InputJsonValue,
+    },
+  });
+
+  await persistRerunExecutions(
+    userId,
+    runId,
+    mergedResults,
+    previousExecutionCounts,
+  );
+
+  const report = normalizeRunReport({
+    testId: existingRun.workflowTestId,
+    runId,
+    testName: existingRun.testName,
+    dryRun,
+    delayMs,
+    database: dbInfo,
+    ranAt: existingRun.ranAt.toISOString(),
+    summary,
+    results: mergedResults,
+  });
+
+  await stream.writeSSE({
+    event: "complete",
+    data: JSON.stringify(report),
   });
 }
 
@@ -288,17 +430,43 @@ workflowTestRoutes.get("/runs/:runId", async (c) => {
 
   if (!run) return c.json({ error: "Workflow test run not found." }, 404);
 
-  return c.json({
-    report: {
-      testId: run.workflowTestId,
-      runId: run.id,
-      testName: run.testName,
-      dryRun: run.dryRun,
-      database: run.database,
-      ranAt: run.ranAt.toISOString(),
-      summary: run.summary,
-      results: run.results,
-    },
+  const report = normalizeRunReport({
+    testId: run.workflowTestId,
+    runId: run.id,
+    testName: run.testName,
+    dryRun: run.dryRun,
+    delayMs: run.delayMs,
+    database: run.database as { dbType: string; name: string; host: string },
+    ranAt: run.ranAt.toISOString(),
+    summary: parseStoredSummary(run.summary),
+    results: parseStoredResults(run.results),
+  });
+
+  return c.json({ report });
+});
+
+workflowTestRoutes.post("/runs/:runId/rerun-failures", async (c) => {
+  const user = c.get("user");
+  const runId = c.req.param("runId");
+  const body = await c.req
+    .json<{ dryRun?: boolean; delayMs?: number }>()
+    .catch(() => ({}));
+
+  return streamSSE(c, async (stream) => {
+    const keepAlive = setInterval(() => {
+      void stream.writeSSE({ event: "ping", data: "{}" });
+    }, STREAM_KEEPALIVE_MS);
+
+    try {
+      await executeRerunFailuresInRun(runId, user.id, stream, body);
+    } catch (err) {
+      await stream.writeSSE({
+        event: "error",
+        data: JSON.stringify({ message: errorMessage(err) }),
+      });
+    } finally {
+      clearInterval(keepAlive);
+    }
   });
 });
 
