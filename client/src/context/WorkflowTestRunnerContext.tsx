@@ -2,24 +2,35 @@ import {
   createContext,
   useCallback,
   useContext,
+  useEffect,
   useMemo,
   useRef,
   useState,
   type ReactNode,
 } from "react";
+import { flushSync } from "react-dom";
 import {
+  cancelWorkflowTestRun,
+  getActiveWorkflowTestRun,
+  getWorkflowTest,
+  getWorkflowTestRun,
   rerunWorkflowTestFailures,
+  resumeWorkflowTestRun,
   runWorkflowTest,
   runWorkflowTestGroup,
+  watchWorkflowTestRun,
   type QueryRunResult,
   type WorkflowTestCompletePayload,
 } from "../api";
+
+const ACTIVE_RUN_STORAGE_KEY = "workflowTestActiveRunId";
 
 export interface WorkflowTestRunConfig {
   testName: string;
   groups: Array<{ name: string; queries: string[] }>;
   groupIds?: string[];
   testId?: string;
+  agentProfileId?: string | null;
   dryRun: boolean;
   delayMs: number;
 }
@@ -29,6 +40,7 @@ export interface WorkflowTestProgress {
   query: string;
   queryIndex: number;
   totalQueries: number;
+  completedQueries: number;
 }
 
 interface WorkflowTestRunnerContextValue {
@@ -37,6 +49,8 @@ interface WorkflowTestRunnerContextValue {
   testId: string | null;
   progress: WorkflowTestProgress;
   liveResults: QueryRunResult[];
+  activityLog: string[];
+  latestActivity: string | null;
   report: WorkflowTestCompletePayload | null;
   error: string | null;
   lastConfig: WorkflowTestRunConfig | null;
@@ -50,6 +64,10 @@ interface WorkflowTestRunnerContextValue {
   ) => Promise<void>;
   rerun: () => Promise<void>;
   rerunFailuresInReport: (
+    runId: string,
+    options: { testName: string; dryRun: boolean; delayMs: number },
+  ) => Promise<void>;
+  resumeFromRun: (
     runId: string,
     options: { testName: string; dryRun: boolean; delayMs: number },
   ) => Promise<void>;
@@ -67,31 +85,61 @@ const initialProgress: WorkflowTestProgress = {
   query: "",
   queryIndex: 0,
   totalQueries: 0,
+  completedQueries: 0,
 };
 
 function createStreamHandlers(
+  isActiveRun: () => boolean,
   setTestId: (id: string | null) => void,
-  setProgress: (p: WorkflowTestProgress) => void,
+  setProgress: React.Dispatch<React.SetStateAction<WorkflowTestProgress>>,
   setLiveResults: React.Dispatch<React.SetStateAction<QueryRunResult[]>>,
   setReport: (r: WorkflowTestCompletePayload | null) => void,
   setShowCompletedBanner: (v: boolean) => void,
   setSavedRefreshToken: React.Dispatch<React.SetStateAction<number>>,
   setError: (msg: string) => void,
+  appendActivity: (message: string) => void,
+  streamCompletedRef: React.MutableRefObject<boolean>,
+  setActiveRunId: (runId: string | null) => void,
 ) {
   return {
     onStart: ({
       totalQueries,
       testId: startedTestId,
+      overallTotalQueries,
+      completedQueries = 0,
+      resume,
+      runId: startedRunId,
+      testName: startedTestName,
     }: {
       totalQueries: number;
       testId?: string;
+      overallTotalQueries?: number;
+      completedQueries?: number;
+      resume?: boolean;
+      runId?: string;
+      testName?: string;
     }) => {
-      setTestId(startedTestId ?? null);
-      setProgress({
-        groupName: "",
-        query: "",
-        queryIndex: 0,
-        totalQueries,
+      if (!isActiveRun()) return;
+      flushSync(() => {
+        setTestId(startedTestId ?? null);
+        if (startedTestName) {
+          // testName set by caller when reconnecting
+        }
+        if (startedRunId) {
+          setActiveRunId(startedRunId);
+          sessionStorage.setItem(ACTIVE_RUN_STORAGE_KEY, startedRunId);
+        }
+        const plannedTotal = overallTotalQueries ?? totalQueries;
+        setProgress({
+          groupName: "",
+          query: "",
+          queryIndex: completedQueries,
+          totalQueries: plannedTotal,
+          completedQueries,
+        });
+        if (!resume) {
+          setLiveResults([]);
+        }
       });
     },
     onProgress: ({
@@ -99,19 +147,62 @@ function createStreamHandlers(
       query,
       queryIndex,
       totalQueries,
-    }: WorkflowTestProgress) => {
-      setProgress({ groupName, query, queryIndex, totalQueries });
+    }: Omit<WorkflowTestProgress, "completedQueries"> & {
+      completedQueries?: number;
+    }) => {
+      if (!isActiveRun()) return;
+      flushSync(() => {
+        setProgress((prev) => ({
+          groupName,
+          query,
+          queryIndex,
+          totalQueries,
+          completedQueries: prev.completedQueries,
+        }));
+      });
+    },
+    onStatus: ({ message }: { message: string }) => {
+      if (!isActiveRun() || !message.trim()) return;
+      flushSync(() => {
+        appendActivity(message.trim());
+      });
     },
     onResult: (result: QueryRunResult) => {
-      setLiveResults((prev) => [...prev, result]);
+      if (!isActiveRun()) return;
+      flushSync(() => {
+        setLiveResults((prev) => {
+          const next = [...prev, result];
+          setProgress((current) => ({
+            ...current,
+            completedQueries: next.length,
+            queryIndex: Math.max(current.queryIndex, next.length),
+          }));
+          return next;
+        });
+      });
     },
     onComplete: (payload: WorkflowTestCompletePayload) => {
+      if (!isActiveRun()) return;
+      streamCompletedRef.current = true;
       setReport(payload);
       setTestId(payload.testId ?? null);
+      const plannedTotal =
+        payload.summary.plannedQueries ?? payload.results.length;
+      setProgress((current) => ({
+        ...current,
+        completedQueries: payload.results.length,
+        queryIndex: payload.results.length,
+        totalQueries: Math.max(current.totalQueries, plannedTotal),
+      }));
       setShowCompletedBanner(true);
       setSavedRefreshToken((token) => token + 1);
+      setActiveRunId(null);
+      sessionStorage.removeItem(ACTIVE_RUN_STORAGE_KEY);
     },
-    onError: (message: string) => setError(message),
+    onError: (message: string) => {
+      if (!isActiveRun()) return;
+      setError(message);
+    },
   };
 }
 
@@ -127,18 +218,33 @@ export function WorkflowTestRunnerProvider({
   const [testId, setTestId] = useState<string | null>(null);
   const [progress, setProgress] = useState<WorkflowTestProgress>(initialProgress);
   const [liveResults, setLiveResults] = useState<QueryRunResult[]>([]);
+  const [activityLog, setActivityLog] = useState<string[]>([]);
+  const [latestActivity, setLatestActivity] = useState<string | null>(null);
   const [report, setReport] = useState<WorkflowTestCompletePayload | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [lastConfig, setLastConfig] = useState<WorkflowTestRunConfig | null>(null);
   const [savedRefreshToken, setSavedRefreshToken] = useState(0);
   const [showCompletedBanner, setShowCompletedBanner] = useState(false);
+  const [activeRunId, setActiveRunId] = useState<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
+  const runGenerationRef = useRef(0);
+  const streamCompletedRef = useRef(false);
+  const reconnectAttemptedRef = useRef(false);
+
+  const appendActivity = useCallback((message: string) => {
+    setLatestActivity(message);
+    setActivityLog((prev) => [...prev.slice(-49), message]);
+  }, []);
 
   const beginRun = useCallback((options?: { keepReport?: boolean }) => {
+    runGenerationRef.current += 1;
+    streamCompletedRef.current = false;
     setError(null);
     setRunning(true);
     setShowCompletedBanner(false);
     setLiveResults([]);
+    setActivityLog([]);
+    setLatestActivity(null);
     if (!options?.keepReport) {
       setReport(null);
     }
@@ -146,13 +252,13 @@ export function WorkflowTestRunnerProvider({
 
     const controller = new AbortController();
     abortRef.current = controller;
-    return controller;
+    return { controller, generation: runGenerationRef.current };
   }, []);
 
   const finishRun = useCallback((controller: AbortController) => {
     setRunning(false);
     abortRef.current = null;
-    if (controller.signal.aborted) {
+    if (controller.signal.aborted && !streamCompletedRef.current) {
       setError("Workflow test cancelled.");
     }
   }, []);
@@ -167,11 +273,16 @@ export function WorkflowTestRunnerProvider({
         setError("Configure a database connection before running workflow tests.");
         return;
       }
+      if (!config.agentProfileId) {
+        setError("Select an agent for this test before running.");
+        return;
+      }
 
       setLastConfig(config);
       setTestName(config.testName);
 
-      const controller = beginRun();
+      const { controller, generation } = beginRun();
+      const isActiveRun = () => generation === runGenerationRef.current;
 
       try {
         await runWorkflowTest(
@@ -179,10 +290,12 @@ export function WorkflowTestRunnerProvider({
             testName: config.testName,
             groups: config.groups.length > 0 ? config.groups : undefined,
             groupIds: config.groupIds,
+            agentProfileId: config.agentProfileId,
             dryRun: config.dryRun,
             delayMs: config.delayMs,
           },
           createStreamHandlers(
+            isActiveRun,
             setTestId,
             setProgress,
             setLiveResults,
@@ -190,15 +303,20 @@ export function WorkflowTestRunnerProvider({
             setShowCompletedBanner,
             setSavedRefreshToken,
             setError,
+            appendActivity,
+            streamCompletedRef,
+            setActiveRunId,
           ),
           controller.signal,
         );
       } catch (err) {
-        if (!controller.signal.aborted) {
+        if (!controller.signal.aborted && isActiveRun()) {
           setError(err instanceof Error ? err.message : "Workflow test failed.");
         }
       } finally {
-        finishRun(controller);
+        if (isActiveRun()) {
+          finishRun(controller);
+        }
       }
     },
     [beginRun, dbConfigured, finishRun, running],
@@ -219,11 +337,18 @@ export function WorkflowTestRunnerProvider({
         return;
       }
 
+      const test = await getWorkflowTest(targetTestId);
+      if (!test.agentProfileId) {
+        setError("Assign an agent to this saved test in Setup before running.");
+        return;
+      }
+
       const config: WorkflowTestRunConfig = {
         testName: options.testName,
         groups: [],
         groupIds: [groupId],
         testId: targetTestId,
+        agentProfileId: test.agentProfileId,
         dryRun: options.dryRun,
         delayMs: options.delayMs,
       };
@@ -231,7 +356,8 @@ export function WorkflowTestRunnerProvider({
       setLastConfig(config);
       setTestName(options.testName);
 
-      const controller = beginRun();
+      const { controller, generation } = beginRun();
+      const isActiveRun = () => generation === runGenerationRef.current;
 
       try {
         await runWorkflowTestGroup(
@@ -239,6 +365,7 @@ export function WorkflowTestRunnerProvider({
           groupId,
           { dryRun: options.dryRun, delayMs: options.delayMs },
           createStreamHandlers(
+            isActiveRun,
             setTestId,
             setProgress,
             setLiveResults,
@@ -246,15 +373,20 @@ export function WorkflowTestRunnerProvider({
             setShowCompletedBanner,
             setSavedRefreshToken,
             setError,
+            appendActivity,
+            streamCompletedRef,
+            setActiveRunId,
           ),
           controller.signal,
         );
       } catch (err) {
-        if (!controller.signal.aborted) {
+        if (!controller.signal.aborted && isActiveRun()) {
           setError(err instanceof Error ? err.message : "Workflow test failed.");
         }
       } finally {
-        finishRun(controller);
+        if (isActiveRun()) {
+          finishRun(controller);
+        }
       }
     },
     [beginRun, dbConfigured, finishRun, running],
@@ -280,13 +412,15 @@ export function WorkflowTestRunnerProvider({
       }
 
       setTestName(options.testName);
-      const controller = beginRun({ keepReport: true });
+      const { controller, generation } = beginRun({ keepReport: true });
+      const isActiveRun = () => generation === runGenerationRef.current;
 
       try {
         await rerunWorkflowTestFailures(
           runId,
           { dryRun: options.dryRun, delayMs: options.delayMs },
           createStreamHandlers(
+            isActiveRun,
             setTestId,
             setProgress,
             setLiveResults,
@@ -294,25 +428,170 @@ export function WorkflowTestRunnerProvider({
             setShowCompletedBanner,
             setSavedRefreshToken,
             setError,
+            appendActivity,
+            streamCompletedRef,
+            setActiveRunId,
           ),
           controller.signal,
         );
       } catch (err) {
-        if (!controller.signal.aborted) {
+        if (!controller.signal.aborted && isActiveRun()) {
           setError(
             err instanceof Error ? err.message : "Failed to rerun failures in report.",
           );
         }
       } finally {
-        finishRun(controller);
+        if (isActiveRun()) {
+          finishRun(controller);
+        }
       }
     },
-    [beginRun, dbConfigured, finishRun, running],
+    [beginRun, dbConfigured, finishRun, running, streamCompletedRef],
+  );
+
+  const resumeFromRun = useCallback(
+    async (
+      runId: string,
+      options: { testName: string; dryRun: boolean; delayMs: number },
+    ) => {
+      if (running) {
+        setError("A workflow test is already running.");
+        return;
+      }
+      if (!dbConfigured) {
+        setError("Configure a database connection before running workflow tests.");
+        return;
+      }
+
+      setTestName(options.testName);
+      const { controller, generation } = beginRun({ keepReport: true });
+      const isActiveRun = () => generation === runGenerationRef.current;
+
+      try {
+        const existing = await getWorkflowTestRun(runId);
+        setReport(existing);
+        setLiveResults(existing.results);
+        const plannedTotal =
+          existing.summary.plannedQueries ?? existing.results.length;
+        setProgress({
+          groupName: "",
+          query: "",
+          queryIndex: existing.results.length,
+          totalQueries: plannedTotal,
+          completedQueries: existing.results.length,
+        });
+
+        await resumeWorkflowTestRun(
+          runId,
+          { dryRun: options.dryRun, delayMs: options.delayMs },
+          createStreamHandlers(
+            isActiveRun,
+            setTestId,
+            setProgress,
+            setLiveResults,
+            setReport,
+            setShowCompletedBanner,
+            setSavedRefreshToken,
+            setError,
+            appendActivity,
+            streamCompletedRef,
+            setActiveRunId,
+          ),
+          controller.signal,
+        );
+      } catch (err) {
+        if (!controller.signal.aborted && isActiveRun()) {
+          setError(
+            err instanceof Error ? err.message : "Failed to resume workflow test.",
+          );
+        }
+      } finally {
+        if (isActiveRun()) {
+          finishRun(controller);
+        }
+      }
+    },
+    [appendActivity, beginRun, dbConfigured, finishRun, running],
   );
 
   const cancel = useCallback(() => {
-    abortRef.current?.abort();
-  }, []);
+    if (!abortRef.current) return;
+    const runId = activeRunId ?? sessionStorage.getItem(ACTIVE_RUN_STORAGE_KEY);
+    if (runId) {
+      void cancelWorkflowTestRun(runId).catch(() => undefined);
+    }
+    abortRef.current.abort();
+  }, [activeRunId]);
+
+  useEffect(() => {
+    if (!dbConfigured || reconnectAttemptedRef.current) return;
+    reconnectAttemptedRef.current = true;
+
+    let cancelled = false;
+
+    async function reconnectToActiveRun() {
+      try {
+        const storedRunId = sessionStorage.getItem(ACTIVE_RUN_STORAGE_KEY);
+        const active = await getActiveWorkflowTestRun();
+        const runId = storedRunId ?? active.run?.id;
+        if (!runId || cancelled) return;
+
+        const report = await getWorkflowTestRun(runId);
+        if (report.summary.runStatus !== "running") {
+          sessionStorage.removeItem(ACTIVE_RUN_STORAGE_KEY);
+          return;
+        }
+
+        setTestName(report.testName);
+        setReport(report);
+        setLiveResults(report.results);
+        setActiveRunId(runId);
+        const plannedTotal =
+          report.summary.plannedQueries ?? report.results.length;
+        setProgress({
+          groupName: "",
+          query: "",
+          queryIndex: report.results.length,
+          totalQueries: plannedTotal,
+          completedQueries: report.results.length,
+        });
+
+        const { controller, generation } = beginRun({ keepReport: true });
+        const isActiveRun = () => generation === runGenerationRef.current;
+
+        try {
+          await watchWorkflowTestRun(
+            runId,
+            createStreamHandlers(
+              isActiveRun,
+              setTestId,
+              setProgress,
+              setLiveResults,
+              setReport,
+              setShowCompletedBanner,
+              setSavedRefreshToken,
+              setError,
+              appendActivity,
+              streamCompletedRef,
+              setActiveRunId,
+            ),
+            controller.signal,
+          );
+        } finally {
+          if (isActiveRun()) {
+            finishRun(controller);
+          }
+        }
+      } catch {
+        // ignore reconnect failures
+      }
+    }
+
+    void reconnectToActiveRun();
+    return () => {
+      cancelled = true;
+    };
+  }, [appendActivity, beginRun, dbConfigured, finishRun]);
 
   const clearError = useCallback(() => setError(null), []);
 
@@ -327,6 +606,8 @@ export function WorkflowTestRunnerProvider({
       testId,
       progress,
       liveResults,
+      activityLog,
+      latestActivity,
       report,
       error,
       lastConfig,
@@ -336,6 +617,7 @@ export function WorkflowTestRunnerProvider({
       runGroup,
       rerun,
       rerunFailuresInReport,
+      resumeFromRun,
       cancel,
       clearError,
       dismissCompletedBanner,
@@ -347,6 +629,8 @@ export function WorkflowTestRunnerProvider({
       testId,
       progress,
       liveResults,
+      activityLog,
+      latestActivity,
       report,
       error,
       lastConfig,
@@ -356,6 +640,7 @@ export function WorkflowTestRunnerProvider({
       runGroup,
       rerun,
       rerunFailuresInReport,
+      resumeFromRun,
       cancel,
       clearError,
       dismissCompletedBanner,

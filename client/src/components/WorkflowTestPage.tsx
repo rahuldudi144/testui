@@ -1,7 +1,10 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { useLocation, useNavigate } from "react-router-dom";
 import { Play, RotateCcw } from "lucide-react";
 import {
   getWorkflowTest,
+  listAgents,
+  type UserAgent,
   type WorkflowTestCompletePayload,
   type WorkflowTestGroupRecord,
 } from "../api";
@@ -19,14 +22,15 @@ import { PageHeader } from "./layout/PageHeader";
 import { WorkflowTestForm } from "./workflow-test/WorkflowTestForm";
 import { WorkflowTestJsonImport } from "./workflow-test/WorkflowTestJsonImport";
 import { WorkflowTestProgress } from "./workflow-test/WorkflowTestProgress";
-import { WorkflowTestReport } from "./workflow-test/WorkflowTestReport";
+import { WorkflowTestReportPanel } from "./workflow-test/WorkflowTestReportPanel";
+import { WorkflowTestCompare } from "./workflow-test/WorkflowTestCompare";
 import { ObservabilityPage } from "./workflow-test/ObservabilityPage";
 import { WorkflowTestSavedPanel } from "./workflow-test/WorkflowTestSavedPanel";
 import { Alert } from "./ui/Alert";
 import { Button } from "./ui/Button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "./ui/Tabs";
 
-type WorkflowTab = "tests" | "setup" | "report" | "usage";
+type WorkflowTab = "tests" | "setup" | "report" | "compare" | "usage";
 
 interface Props {
   onBack: () => void;
@@ -35,10 +39,14 @@ interface Props {
 }
 
 export function WorkflowTestPage({ onBack, dbConfigured, onOpenSettings }: Props) {
+  const navigate = useNavigate();
+  const location = useLocation();
   const {
     running,
     progress,
     liveResults,
+    activityLog,
+    latestActivity,
     report,
     error: runnerError,
     savedRefreshToken,
@@ -49,10 +57,10 @@ export function WorkflowTestPage({ onBack, dbConfigured, onOpenSettings }: Props
     cancel,
     clearError,
     setReport,
+    showCompletedBanner,
     dismissCompletedBanner,
   } = useWorkflowTestRunner();
 
-  const [tab, setTab] = useState<WorkflowTab>("tests");
   const [savedTestCount, setSavedTestCount] = useState(0);
   const [testName, setTestName] = useState("");
   const [groups, setGroups] = useState<StressTestGroupInput[]>([
@@ -60,6 +68,8 @@ export function WorkflowTestPage({ onBack, dbConfigured, onOpenSettings }: Props
   ]);
   const [dryRun, setDryRun] = useState(false);
   const [delayMs, setDelayMs] = useState(0);
+  const [agentProfileId, setAgentProfileId] = useState<string | null>(null);
+  const [agents, setAgents] = useState<UserAgent[]>([]);
   const [failuresGroup, setFailuresGroup] = useState<WorkflowTestGroupRecord | null>(
     null,
   );
@@ -67,12 +77,42 @@ export function WorkflowTestPage({ onBack, dbConfigured, onOpenSettings }: Props
 
   const error = localError ?? runnerError;
 
+  const tabFromPath = useMemo((): WorkflowTab => {
+    const match = location.pathname.match(/^\/tests(?:\/([^/]+))?$/);
+    const raw = match?.[1];
+    if (
+      raw === "setup" ||
+      raw === "report" ||
+      raw === "compare" ||
+      raw === "usage"
+    ) {
+      return raw;
+    }
+    return "tests";
+  }, [location.pathname]);
+
+  const tab = tabFromPath;
+
+  const setTab = useCallback(
+    (next: WorkflowTab) => {
+      navigate(next === "tests" ? "/tests" : `/tests/${next}`);
+    },
+    [navigate],
+  );
+
   const syncFormFromConfig = useCallback((config: WorkflowTestRunConfig) => {
     setTestName(config.testName);
     setGroups(groupsToFormInput(config.groups));
     setDryRun(config.dryRun);
     setDelayMs(config.delayMs);
+    setAgentProfileId(config.agentProfileId ?? null);
   }, []);
+
+  useEffect(() => {
+    void listAgents()
+      .then((data) => setAgents(data.agents))
+      .catch(() => setAgents([]));
+  }, [savedRefreshToken]);
 
   useEffect(() => {
     if (lastConfig) {
@@ -97,17 +137,16 @@ export function WorkflowTestPage({ onBack, dbConfigured, onOpenSettings }: Props
   }, [report?.testId, savedRefreshToken]);
 
   useEffect(() => {
-    if (report && !running) {
-      setTab("report");
-      dismissCompletedBanner();
-      if (report.testName && !testName.trim()) {
-        setTestName(report.testName);
-      }
-      if (report.dryRun !== undefined) {
-        setDryRun(report.dryRun);
-      }
+    if (!showCompletedBanner || !report) return;
+    navigate("/tests/report");
+    dismissCompletedBanner();
+    if (report.testName && !testName.trim()) {
+      setTestName(report.testName);
     }
-  }, [report, running, dismissCompletedBanner, testName]);
+    if (report.dryRun !== undefined) {
+      setDryRun(report.dryRun);
+    }
+  }, [showCompletedBanner, report, dismissCompletedBanner, testName, navigate]);
 
   function resolveRunConfig(): WorkflowTestRunConfig | null {
     const apiGroups = toApiGroups(groups);
@@ -117,6 +156,7 @@ export function WorkflowTestPage({ onBack, dbConfigured, onOpenSettings }: Props
       return {
         testName: trimmedName,
         groups: apiGroups,
+        agentProfileId,
         dryRun,
         delayMs,
       };
@@ -142,6 +182,10 @@ export function WorkflowTestPage({ onBack, dbConfigured, onOpenSettings }: Props
     }
     if (!dbConfigured) {
       setLocalError("Configure a database connection before running workflow tests.");
+      return;
+    }
+    if (!config.agentProfileId) {
+      setLocalError("Select an agent for this test before running.");
       return;
     }
 
@@ -182,12 +226,14 @@ export function WorkflowTestPage({ onBack, dbConfigured, onOpenSettings }: Props
     failuresGroup: WorkflowTestGroupRecord | null;
     dryRun: boolean;
     delayMs: number;
+    agentProfileId?: string | null;
   }) {
     setTestName(data.testName);
     setGroups(data.groups);
     setFailuresGroup(data.failuresGroup);
     setDryRun(data.dryRun);
     setDelayMs(data.delayMs);
+    setAgentProfileId(data.agentProfileId ?? null);
     setLocalError(null);
     clearError();
     setTab("setup");
@@ -195,7 +241,7 @@ export function WorkflowTestPage({ onBack, dbConfigured, onOpenSettings }: Props
 
   function handleLoadSavedReport(payload: WorkflowTestCompletePayload) {
     setReport(payload);
-    setTab("report");
+    navigate("/tests/report");
     setLocalError(null);
     clearError();
   }
@@ -228,7 +274,7 @@ export function WorkflowTestPage({ onBack, dbConfigured, onOpenSettings }: Props
                 type="button"
                 onClick={() => void handleRun()}
                 loading={running}
-                disabled={running}
+                disabled={running || !agentProfileId}
               >
                 <Play className="h-4 w-4" />
                 Run workflow test
@@ -272,6 +318,10 @@ export function WorkflowTestPage({ onBack, dbConfigured, onOpenSettings }: Props
               query={progress.query}
               queryIndex={progress.queryIndex}
               totalQueries={progress.totalQueries}
+              completedQueries={Math.max(progress.completedQueries, liveResults.length)}
+              latestActivity={latestActivity}
+              activityLog={activityLog}
+              liveResults={liveResults}
               onCancel={cancel}
             />
           </div>
@@ -292,9 +342,10 @@ export function WorkflowTestPage({ onBack, dbConfigured, onOpenSettings }: Props
               Tests{savedTestCount > 0 ? ` (${savedTestCount})` : ""}
             </TabsTrigger>
             <TabsTrigger value="setup">Setup</TabsTrigger>
-            <TabsTrigger value="report" disabled={!report}>
+            <TabsTrigger value="report">
               Report{report ? ` (${report.results.length})` : ""}
             </TabsTrigger>
+            <TabsTrigger value="compare">Compare</TabsTrigger>
             <TabsTrigger value="usage">Usage</TabsTrigger>
           </TabsList>
 
@@ -321,6 +372,9 @@ export function WorkflowTestPage({ onBack, dbConfigured, onOpenSettings }: Props
                 onTestNameChange={setTestName}
                 groups={groups}
                 onGroupsChange={setGroups}
+                agents={agents}
+                agentProfileId={agentProfileId}
+                onAgentProfileIdChange={setAgentProfileId}
                 dryRun={dryRun}
                 onDryRunChange={setDryRun}
                 delayMs={delayMs}
@@ -332,13 +386,19 @@ export function WorkflowTestPage({ onBack, dbConfigured, onOpenSettings }: Props
           </TabsContent>
 
           <TabsContent value="report">
-            {report ? (
-              <WorkflowTestReport report={report} />
-            ) : (
-              <p className="py-8 text-center text-sm text-muted-foreground">
-                Run a workflow test to see the report.
-              </p>
-            )}
+            <WorkflowTestReportPanel
+              contextReport={report}
+              refreshToken={savedRefreshToken}
+              onError={setLocalError}
+              onReportChange={setReport}
+            />
+          </TabsContent>
+
+          <TabsContent value="compare">
+            <WorkflowTestCompare
+              refreshToken={savedRefreshToken}
+              onError={setLocalError}
+            />
           </TabsContent>
 
           <TabsContent value="usage">

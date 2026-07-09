@@ -1,5 +1,6 @@
 import { useState } from "react";
 import {
+  CircleUser,
   FlaskConical,
   LogOut,
   MessageSquare,
@@ -10,8 +11,8 @@ import {
 } from "lucide-react";
 import { cn } from "../lib/cn";
 import { useWorkflowTestRunner } from "../context/WorkflowTestRunnerContext";
+import { LiveFlaskIcon } from "./workflow-test/LiveFlaskIcon";
 import { Button } from "./ui/Button";
-import { Spinner } from "./ui/Spinner";
 import { ConfirmDialog } from "./ui/ConfirmDialog";
 import { EmptyState } from "./ui/EmptyState";
 import { Input } from "./ui/Input";
@@ -62,12 +63,18 @@ export function Sidebar({
     title: string;
   } | null>(null);
   const [deleting, setDeleting] = useState(false);
-  const { running: workflowTestRunning, testName, progress } =
-    useWorkflowTestRunner();
+  const {
+    running: workflowTestRunning,
+    testName,
+    progress,
+    liveResults,
+  } = useWorkflowTestRunner();
 
   const filtered = conversations.filter((c) =>
     (c.title ?? "Untitled").toLowerCase().includes(search.toLowerCase()),
   );
+
+  const completedCount = Math.max(progress.completedQueries, liveResults.length);
 
   async function confirmDelete() {
     if (!deleteTarget) return;
@@ -88,59 +95,8 @@ export function Sidebar({
         </div>
         <div className="min-w-0 flex-1">
           <p className="truncate text-sm font-semibold text-foreground">DB Agent</p>
-          <p className="truncate text-xs text-muted-foreground" title={user.username}>
-            {user.username}
-          </p>
         </div>
-        <Button
-          type="button"
-          variant="ghost"
-          size="icon"
-          onClick={onOpenWorkflowTest}
-          aria-label={
-            workflowTestRunning ? "Workflow test running — open" : "Workflow test"
-          }
-          className={cn(workflowTestRunning && "relative text-primary")}
-        >
-          {workflowTestRunning ? (
-            <Spinner className="h-4 w-4" />
-          ) : (
-            <FlaskConical className="h-4 w-4" />
-          )}
-        </Button>
-        <Button
-          type="button"
-          variant="ghost"
-          size="icon"
-          onClick={onOpenSettings}
-          aria-label="Settings"
-        >
-          <Settings className="h-4 w-4" />
-        </Button>
-        <Button
-          type="button"
-          variant="ghost"
-          size="icon"
-          onClick={onLogout}
-          aria-label="Log out"
-        >
-          <LogOut className="h-4 w-4" />
-        </Button>
       </div>
-
-      {workflowTestRunning && (
-        <button
-          type="button"
-          onClick={onOpenWorkflowTest}
-          className="shrink-0 rounded-lg border border-primary/30 bg-primary/5 px-3 py-2 text-left transition-colors hover:bg-primary/10 focus-ring"
-        >
-          <p className="text-xs font-medium text-foreground">Workflow test running</p>
-          <p className="mt-0.5 truncate text-[11px] text-muted-foreground">
-            {testName || "Unnamed test"} · {progress.queryIndex}/
-            {progress.totalQueries || "?"}
-          </p>
-        </button>
-      )}
 
       <Button type="button" className="w-full shrink-0" onClick={onNew}>
         <MessageSquarePlus className="h-4 w-4" />
@@ -244,6 +200,72 @@ export function Sidebar({
               );
             })
           )}
+        </div>
+      </div>
+
+      <div className="mt-auto shrink-0 space-y-2 border-t border-border pt-3">
+        {workflowTestRunning && (
+          <button
+            type="button"
+            onClick={onOpenWorkflowTest}
+            className="w-full rounded-lg border border-primary/30 bg-primary/5 px-3 py-2 text-left transition-colors hover:bg-primary/10 focus-ring"
+          >
+            <p className="text-xs font-medium text-foreground">Workflow test running</p>
+            <p className="mt-0.5 truncate text-[11px] text-muted-foreground">
+              {testName || "Unnamed test"} · {completedCount}/
+              {progress.totalQueries || "?"}
+            </p>
+          </button>
+        )}
+
+        <div className="flex items-center gap-2 px-1">
+          <CircleUser className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden />
+          <p
+            className="min-w-0 flex-1 truncate text-xs text-muted-foreground"
+            title={user.username}
+          >
+            {user.username}
+          </p>
+        </div>
+
+        <div className="flex items-center justify-between gap-1">
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            onClick={onOpenWorkflowTest}
+            aria-label={
+              workflowTestRunning ? "Workflow test running — open" : "Workflow test"
+            }
+            className={cn(workflowTestRunning && "text-primary")}
+            title="Workflow test"
+          >
+            {workflowTestRunning ? (
+              <LiveFlaskIcon iconClassName="text-primary" />
+            ) : (
+              <FlaskConical className="h-4 w-4" />
+            )}
+          </Button>
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            onClick={onOpenSettings}
+            aria-label="Settings"
+            title="Settings"
+          >
+            <Settings className="h-4 w-4" />
+          </Button>
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            onClick={onLogout}
+            aria-label="Log out"
+            title="Log out"
+          >
+            <LogOut className="h-4 w-4" />
+          </Button>
         </div>
       </div>
 

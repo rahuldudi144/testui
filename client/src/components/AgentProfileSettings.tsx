@@ -9,6 +9,8 @@ import {
   type LlmProvider,
   type UserAgent,
 } from "../api";
+import { providerLabel } from "../lib/llmProviders";
+import { AgentLlmFields } from "./AgentLlmFields";
 import { cn } from "../lib/cn";
 import { Alert } from "./ui/Alert";
 import { Badge } from "./ui/Badge";
@@ -30,44 +32,6 @@ import { Textarea } from "./ui/Textarea";
 
 interface Props {
   onAgentChange?: () => void;
-}
-
-const PROVIDER_LABELS: Record<LlmProvider, string> = {
-  openai: "OpenAI",
-  ollama: "Ollama",
-};
-
-function providerLabel(provider: string | null): string {
-  if (provider === "openai" || provider === "ollama") {
-    return PROVIDER_LABELS[provider];
-  }
-  return "Server default";
-}
-
-function baseUrlLabel(provider: LlmProvider): string {
-  return provider === "ollama" ? "Ollama base URL" : "OpenAI base URL (optional)";
-}
-
-function ProviderSelect({
-  id,
-  value,
-  onChange,
-}: {
-  id: string;
-  value: LlmProvider;
-  onChange: (value: LlmProvider) => void;
-}) {
-  return (
-    <select
-      id={id}
-      className="flex h-10 w-full rounded-md border border-input bg-background px-3 text-sm"
-      value={value}
-      onChange={(e) => onChange(e.target.value as LlmProvider)}
-    >
-      <option value="openai">OpenAI</option>
-      <option value="ollama">Ollama</option>
-    </select>
-  );
 }
 
 export function AgentProfileSettings({ onAgentChange }: Props) {
@@ -170,7 +134,7 @@ export function AgentProfileSettings({ onAgentChange }: Props) {
     setEditingId(agent.id);
     setEditName(agent.name);
     setEditSystemPrompt(agent.systemPrompt ?? "");
-    setEditProvider(agent.llmProvider ?? "openai");
+    setEditProvider((agent.llmProvider as LlmProvider) ?? "openai");
     setEditModelName(agent.modelName ?? "");
     setEditBaseUrl(agent.baseUrl ?? "");
     setEditApiKey("");
@@ -401,68 +365,21 @@ export function AgentProfileSettings({ onAgentChange }: Props) {
                               />
                             </FormField>
                             <div className="grid gap-4 sm:grid-cols-2">
-                              <FormField>
-                                <Label htmlFor={`edit-agent-provider-${agent.id}`}>
-                                  LLM provider
-                                </Label>
-                                <ProviderSelect
-                                  id={`edit-agent-provider-${agent.id}`}
-                                  value={editProvider}
-                                  onChange={setEditProvider}
-                                />
-                              </FormField>
-                              <FormField>
-                                <Label htmlFor={`edit-agent-model-${agent.id}`}>
-                                  Model name
-                                </Label>
-                                <Input
-                                  id={`edit-agent-model-${agent.id}`}
-                                  value={editModelName}
-                                  onChange={(e) => setEditModelName(e.target.value)}
-                                  placeholder={
-                                    editProvider === "ollama" ? "llama3.1" : "gpt-4o-mini"
-                                  }
+                              <FormField className="sm:col-span-2">
+                                <AgentLlmFields
+                                  idPrefix={`edit-agent-${agent.id}`}
+                                  provider={editProvider}
+                                  onProviderChange={setEditProvider}
+                                  modelName={editModelName}
+                                  onModelNameChange={setEditModelName}
+                                  apiKey={editApiKey}
+                                  onApiKeyChange={setEditApiKey}
+                                  baseUrl={editBaseUrl}
+                                  onBaseUrlChange={setEditBaseUrl}
+                                  hasStoredApiKey={agent.hasApiKey}
                                 />
                               </FormField>
                             </div>
-                            <FormField>
-                              <Label htmlFor={`edit-agent-base-url-${agent.id}`}>
-                                {baseUrlLabel(editProvider)}
-                              </Label>
-                              <Input
-                                id={`edit-agent-base-url-${agent.id}`}
-                                value={editBaseUrl}
-                                onChange={(e) => setEditBaseUrl(e.target.value)}
-                                placeholder={
-                                  editProvider === "ollama"
-                                    ? "http://127.0.0.1:11434"
-                                    : "https://api.openai.com/v1"
-                                }
-                              />
-                            </FormField>
-                            {editProvider === "openai" && (
-                              <FormField>
-                                <Label htmlFor={`edit-agent-api-key-${agent.id}`}>
-                                  API key
-                                </Label>
-                                <Input
-                                  id={`edit-agent-api-key-${agent.id}`}
-                                  type="password"
-                                  value={editApiKey}
-                                  onChange={(e) => setEditApiKey(e.target.value)}
-                                  placeholder={
-                                    agent.hasApiKey
-                                      ? "Leave blank to keep existing key"
-                                      : "sk-…"
-                                  }
-                                />
-                                <p className="text-xs text-muted-foreground">
-                                  {agent.hasApiKey
-                                    ? "A key is stored. Enter a new value only to replace it."
-                                    : "Leave blank to use the server's environment key."}
-                                </p>
-                              </FormField>
-                            )}
                             <FormField>
                               <Label htmlFor={`edit-agent-prompt-${agent.id}`}>
                                 System prompt
@@ -563,55 +480,17 @@ export function AgentProfileSettings({ onAgentChange }: Props) {
               />
             </FormField>
 
-            <div className="grid gap-4 sm:grid-cols-2">
-              <FormField>
-                <Label htmlFor="agent-provider">LLM provider</Label>
-                <ProviderSelect
-                  id="agent-provider"
-                  value={provider}
-                  onChange={setProvider}
-                />
-              </FormField>
-              <FormField>
-                <Label htmlFor="agent-model">Model name</Label>
-                <Input
-                  id="agent-model"
-                  value={modelName}
-                  onChange={(e) => setModelName(e.target.value)}
-                  placeholder={provider === "ollama" ? "llama3.1" : "gpt-4o-mini"}
-                />
-              </FormField>
-            </div>
-
-            <FormField>
-              <Label htmlFor="agent-base-url">{baseUrlLabel(provider)}</Label>
-              <Input
-                id="agent-base-url"
-                value={baseUrl}
-                onChange={(e) => setBaseUrl(e.target.value)}
-                placeholder={
-                  provider === "ollama"
-                    ? "http://127.0.0.1:11434"
-                    : "https://api.openai.com/v1"
-                }
-              />
-            </FormField>
-
-            {provider === "openai" && (
-              <FormField>
-                <Label htmlFor="agent-api-key">API key</Label>
-                <Input
-                  id="agent-api-key"
-                  type="password"
-                  value={apiKey}
-                  onChange={(e) => setApiKey(e.target.value)}
-                  placeholder="sk-…"
-                />
-                <p className="text-xs text-muted-foreground">
-                  Leave blank to use the server's environment key.
-                </p>
-              </FormField>
-            )}
+            <AgentLlmFields
+              idPrefix="agent"
+              provider={provider}
+              onProviderChange={setProvider}
+              modelName={modelName}
+              onModelNameChange={setModelName}
+              apiKey={apiKey}
+              onApiKeyChange={setApiKey}
+              baseUrl={baseUrl}
+              onBaseUrlChange={setBaseUrl}
+            />
 
             <FormField>
               <Label htmlFor="agent-system-prompt">System prompt</Label>

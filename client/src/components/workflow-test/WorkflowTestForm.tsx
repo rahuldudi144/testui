@@ -1,5 +1,6 @@
 import { Plus, Trash2 } from "lucide-react";
-import type { WorkflowTestGroupRecord } from "../../api";
+import type { UserAgent, WorkflowTestGroupRecord } from "../../api";
+import { providerLabel } from "../../lib/llmProviders";
 import {
   countQueriesInGroups,
   parseQueries,
@@ -17,6 +18,9 @@ interface Props {
   onTestNameChange: (value: string) => void;
   groups: StressTestGroupInput[];
   onGroupsChange: (groups: StressTestGroupInput[]) => void;
+  agents: UserAgent[];
+  agentProfileId: string | null;
+  onAgentProfileIdChange: (value: string | null) => void;
   dryRun: boolean;
   onDryRunChange: (value: boolean) => void;
   delayMs: number;
@@ -34,6 +38,9 @@ export function WorkflowTestForm({
   onTestNameChange,
   groups,
   onGroupsChange,
+  agents,
+  agentProfileId,
+  onAgentProfileIdChange,
   dryRun,
   onDryRunChange,
   delayMs,
@@ -61,6 +68,32 @@ export function WorkflowTestForm({
           disabled={disabled}
           required
         />
+      </FormField>
+
+      <FormField>
+        <Label htmlFor="workflow-test-agent">Agent</Label>
+        <select
+          id="workflow-test-agent"
+          className="flex h-10 w-full rounded-md border border-input bg-background px-3 text-sm"
+          value={agentProfileId ?? ""}
+          disabled={disabled}
+          onChange={(e) =>
+            onAgentProfileIdChange(e.target.value ? e.target.value : null)
+          }
+        >
+          <option value="" disabled>
+            Select an agent…
+          </option>
+          {agents.map((agent) => (
+            <option key={agent.id} value={agent.id}>
+              {agent.name} ({providerLabel(agent.llmProvider)}
+              {agent.modelName ? ` · ${agent.modelName}` : ""})
+            </option>
+          ))}
+        </select>
+        <p className="mt-1 text-xs text-muted-foreground">
+          Required. This test always runs with the selected agent profile.
+        </p>
       </FormField>
 
       <div className="space-y-4">

@@ -4,6 +4,7 @@
   "type": "module",
   "scripts": {
     "dev": "bun run dev:server & bun run dev:client",
+    "predev": "bun scripts/free-dev-port.ts 4000",
     "dev:server": "bun --watch --env-file=.env server/index.ts",
     "dev:client": "vite --config client/vite.config.ts",
     "build": "vite build --config client/vite.config.ts",
@@ -19,7 +20,9 @@
   },
   "dependencies": {
     "@hono/node-server": "^1.14.3",
-    "@langchain/core": "^0.3.57",
+    "@langchain/anthropic": "^0.3.24",
+    "@langchain/core": "^0.3.58",
+    "@langchain/google": "^0.2.1",
     "@langchain/langgraph": "^0.2.72",
     "@langchain/ollama": "^0.2.4",
     "@langchain/openai": "^0.5.10",
@@ -37,6 +40,8 @@
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
     "react-markdown": "^10.1.0",
+    "react-router-dom": "^7.18.1",
+    "recharts": "^3.9.2",
     "remark-gfm": "^4.0.1",
     "tailwind-merge": "^3.6.0",
     "zod": "^3.25.51"

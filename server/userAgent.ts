@@ -86,8 +86,28 @@ export function profileAgentConfig(
     llmProvider: provider || undefined,
     modelName: modelName || undefined,
     apiKey: apiKey || undefined,
-    // A single profile base URL maps to the field for the selected provider.
-    baseUrl: provider === "openai" ? baseUrl || undefined : undefined,
     ollamaBaseUrl: provider === "ollama" ? baseUrl || undefined : undefined,
+    baseUrl: provider && provider !== "ollama" ? baseUrl || undefined : undefined,
+  };
+}
+
+export interface AgentSnapshot {
+  id: string;
+  name: string;
+  llmProvider: string | null;
+  modelName: string | null;
+}
+
+export function toAgentSnapshot(agent: {
+  id: string;
+  name: string;
+  llmProvider?: string | null;
+  modelName?: string | null;
+}): AgentSnapshot {
+  return {
+    id: agent.id,
+    name: agent.name,
+    llmProvider: agent.llmProvider ?? null,
+    modelName: agent.modelName ?? null,
   };
 }

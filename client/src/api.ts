@@ -43,14 +43,34 @@ export interface UserDatabase {
   updatedAt: string;
 }
 
-export type LlmProvider = "openai" | "ollama";
+export type LlmProvider =
+  | "openai"
+  | "ollama"
+  | "anthropic"
+  | "gemini"
+  | "nvidia_nim"
+  | "groq"
+  | "together"
+  | "fireworks"
+  | "deepinfra"
+  | "openrouter"
+  | "kilo"
+  | "vllm"
+  | "litellm";
+
+export interface AgentSummary {
+  id: string;
+  name: string;
+  llmProvider: string | null;
+  modelName: string | null;
+}
 
 export interface UserAgent {
   id: string;
   name: string;
   systemPrompt: string | null;
   hasSystemPrompt: boolean;
-  llmProvider: LlmProvider | null;
+  llmProvider: string | null;
   modelName: string | null;
   baseUrl: string | null;
   hasApiKey: boolean;
@@ -59,7 +79,7 @@ export interface UserAgent {
 }
 
 export interface AgentLlmInput {
-  llmProvider?: LlmProvider | null;
+  llmProvider?: LlmProvider | string | null;
   modelName?: string | null;
   apiKey?: string | null;
   baseUrl?: string | null;
@@ -332,6 +352,7 @@ export async function sendMessage(
   dryRun: boolean,
   handlers: StreamHandlers,
   options?: SendMessageOptions,
+  signal?: AbortSignal,
 ): Promise<void> {
   const res = await fetch(`/api/conversations/${conversationId}/messages`, {
     method: "POST",
@@ -346,6 +367,7 @@ export async function sendMessage(
       streamEvents: true,
       debug: options?.debug ?? false,
     }),
+    signal,
   });
 
   if (!res.ok) {
@@ -359,47 +381,68 @@ export async function sendMessage(
   const decoder = new TextDecoder();
   let buffer = "";
 
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
+  const abortReader = () => {
+    void reader.cancel().catch(() => undefined);
+  };
 
-    buffer += decoder.decode(value, { stream: true });
-    const parts = buffer.split("\n\n");
-    buffer = parts.pop() ?? "";
+  if (signal?.aborted) {
+    abortReader();
+    throw new DOMException("The operation was aborted.", "AbortError");
+  }
 
-    for (const part of parts) {
-      const lines = part.split("\n");
-      let event = "message";
-      let data = "";
+  const onAbort = () => abortReader();
+  signal?.addEventListener("abort", onAbort);
 
-      for (const line of lines) {
-        if (line.startsWith("event:")) event = line.slice(6).trim();
-        if (line.startsWith("data:")) data += line.slice(5).trim();
+  try {
+    while (true) {
+      if (signal?.aborted) {
+        throw new DOMException("The operation was aborted.", "AbortError");
       }
 
-      if (!data) continue;
-      if (event === "ping") continue;
+      const { done, value } = await reader.read();
+      if (done) break;
 
-      const payload = JSON.parse(data);
-      if (event === "status") handlers.onStatus?.(payload);
-      if (event === "agent" && isAgentEvent(payload)) {
-        if (
-          isPublicStreamEvent(payload, options?.debug ?? false)
-        ) {
-          handlers.onAgentEvent?.(payload);
+      buffer += decoder.decode(value, { stream: true });
+      const parts = buffer.split("\n\n");
+      buffer = parts.pop() ?? "";
+
+      for (const part of parts) {
+        const lines = part.split("\n");
+        let event = "message";
+        let data = "";
+
+        for (const line of lines) {
+          if (line.startsWith("event:")) event = line.slice(6).trim();
+          if (line.startsWith("data:")) data += line.slice(5).trim();
         }
-        if (payload.type === "token") {
-          handlers.onToken(payload.content);
+
+        if (!data) continue;
+        if (event === "ping") continue;
+
+        const payload = JSON.parse(data);
+        if (event === "status") handlers.onStatus?.(payload);
+        if (event === "agent" && isAgentEvent(payload)) {
+          if (
+            isPublicStreamEvent(payload, options?.debug ?? false)
+          ) {
+            handlers.onAgentEvent?.(payload);
+          }
+          if (payload.type === "token") {
+            handlers.onToken(payload.content);
+          }
+          if (payload.type === "error") {
+            handlers.onError(payload.message ?? "Unknown error");
+          }
         }
-        if (payload.type === "error") {
+        if (event === "token") handlers.onToken(payload.text ?? "");
+        if (event === "done") handlers.onDone(payload);
+        if (event === "error")
           handlers.onError(payload.message ?? "Unknown error");
-        }
       }
-      if (event === "token") handlers.onToken(payload.text ?? "");
-      if (event === "done") handlers.onDone(payload);
-      if (event === "error")
-        handlers.onError(payload.message ?? "Unknown error");
     }
+  } finally {
+    signal?.removeEventListener("abort", onAbort);
+    abortReader();
   }
 }
 
@@ -475,6 +518,17 @@ export interface QueryRunResult {
   executionCount?: number;
 }
 
+export type WorkflowTestRunLifecycleStatus =
+  | "running"
+  | "completed"
+  | "partial"
+  | "cancelled";
+
+export interface PlannedQueryItem {
+  groupName: string;
+  query: string;
+}
+
 export interface WorkflowTestSummary {
   total: number;
   passed: number;
@@ -497,6 +551,9 @@ export interface WorkflowTestSummary {
   completionTokens?: number;
   totalTokens?: number;
   llmCallCount?: number;
+  runStatus?: WorkflowTestRunLifecycleStatus;
+  plannedQueries?: number;
+  plannedItems?: PlannedQueryItem[];
 }
 
 export interface WorkflowTestCompletePayload {
@@ -507,6 +564,7 @@ export interface WorkflowTestCompletePayload {
   delayMs?: number;
   database: { dbType: string; name: string; host: string };
   ranAt: string;
+  agent?: AgentSummary;
   summary: WorkflowTestSummary;
   results: QueryRunResult[];
 }
@@ -524,6 +582,9 @@ export interface WorkflowTestGroupRecord {
 export interface SavedWorkflowTest {
   id: string;
   name: string;
+  agentProfileId: string | null;
+  suiteKey: string | null;
+  agent: AgentSummary | null;
   dryRun: boolean;
   delayMs: number;
   groups: WorkflowTestGroupRecord[];
@@ -546,12 +607,31 @@ export interface WorkflowTestDetail extends SavedWorkflowTest {
   }>;
 }
 
+export function isResumableWorkflowRun(
+  report: WorkflowTestCompletePayload,
+): boolean {
+  const planned = report.summary.plannedQueries ?? 0;
+  const completed = report.results.length;
+  if (!report.runId || planned <= 0 || completed >= planned) return false;
+  const status = report.summary.runStatus;
+  return (
+    status === "running" ||
+    status === "partial" ||
+    status === "cancelled"
+  );
+}
+
 export interface WorkflowTestHandlers {
   onStart?: (meta: {
     testName: string;
     testId?: string;
     totalQueries: number;
+    overallTotalQueries?: number;
+    completedQueries?: number;
     dryRun: boolean;
+    runId?: string;
+    resume?: boolean;
+    rerun?: boolean;
   }) => void;
   onProgress?: (meta: {
     groupName: string;
@@ -559,6 +639,7 @@ export interface WorkflowTestHandlers {
     totalQueries: number;
     query: string;
   }) => void;
+  onStatus?: (meta: { message: string }) => void;
   onResult?: (result: QueryRunResult) => void;
   onComplete?: (payload: WorkflowTestCompletePayload) => void;
   onError?: (message: string) => void;
@@ -567,6 +648,7 @@ export interface WorkflowTestHandlers {
 async function consumeWorkflowTestStream(
   res: Response,
   handlers: WorkflowTestHandlers,
+  signal?: AbortSignal,
 ): Promise<void> {
   if (!res.body) throw new Error("No response body for stream.");
 
@@ -574,38 +656,60 @@ async function consumeWorkflowTestStream(
   const decoder = new TextDecoder();
   let buffer = "";
 
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
+  const abortReader = () => {
+    void reader.cancel().catch(() => undefined);
+  };
 
-    buffer += decoder.decode(value, { stream: true });
-    const parts = buffer.split("\n\n");
-    buffer = parts.pop() ?? "";
+  if (signal?.aborted) {
+    abortReader();
+    throw new DOMException("The operation was aborted.", "AbortError");
+  }
 
-    for (const part of parts) {
-      const lines = part.split("\n");
-      let event = "message";
-      let data = "";
+  const onAbort = () => abortReader();
+  signal?.addEventListener("abort", onAbort);
 
-      for (const line of lines) {
-        if (line.startsWith("event:")) event = line.slice(6).trim();
-        if (line.startsWith("data:")) data += line.slice(5).trim();
+  try {
+    while (true) {
+      if (signal?.aborted) {
+        throw new DOMException("The operation was aborted.", "AbortError");
       }
 
-      if (!data) continue;
-      if (event === "ping") continue;
+      const { done, value } = await reader.read();
+      if (done) break;
 
-      const payload = JSON.parse(data);
-      if (event === "start") handlers.onStart?.(payload);
-      if (event === "progress") handlers.onProgress?.(payload);
-      if (event === "result") handlers.onResult?.(payload as QueryRunResult);
-      if (event === "complete") {
-        handlers.onComplete?.(payload as WorkflowTestCompletePayload);
-      }
-      if (event === "error") {
-        handlers.onError?.(payload.message ?? "Unknown error");
+      buffer += decoder.decode(value, { stream: true });
+      const parts = buffer.split("\n\n");
+      buffer = parts.pop() ?? "";
+
+      for (const part of parts) {
+        const lines = part.split("\n");
+        let event = "message";
+        let data = "";
+
+        for (const line of lines) {
+          if (line.startsWith("event:")) event = line.slice(6).trim();
+          if (line.startsWith("data:")) data += line.slice(5).trim();
+        }
+
+        if (!data) continue;
+        if (event === "ping") continue;
+
+        const payload = JSON.parse(data);
+        if (event === "start") handlers.onStart?.(payload);
+        if (event === "progress") handlers.onProgress?.(payload);
+        if (event === "status") handlers.onStatus?.(payload);
+        if (event === "result") handlers.onResult?.(payload as QueryRunResult);
+        if (event === "complete") {
+          handlers.onComplete?.(payload as WorkflowTestCompletePayload);
+        }
+        if (event === "error") {
+          handlers.onError?.(payload.message ?? "Unknown error");
+        }
       }
     }
+  } finally {
+    signal?.removeEventListener("abort", onAbort);
+    abortReader();
   }
 }
 
@@ -614,6 +718,7 @@ export async function runWorkflowTest(
     testName: string;
     groups?: Array<{ name: string; queries: string[] }>;
     groupIds?: string[];
+    agentProfileId?: string | null;
     dryRun?: boolean;
     delayMs?: number;
   },
@@ -636,7 +741,7 @@ export async function runWorkflowTest(
     throw new Error(data.error ?? `Request failed (${res.status})`);
   }
 
-  await consumeWorkflowTestStream(res, handlers);
+  await consumeWorkflowTestStream(res, handlers, signal);
 }
 
 export async function runWorkflowTestGroup(
@@ -665,7 +770,7 @@ export async function runWorkflowTestGroup(
     throw new Error(data.error ?? `Request failed (${res.status})`);
   }
 
-  await consumeWorkflowTestStream(res, handlers);
+  await consumeWorkflowTestStream(res, handlers, signal);
 }
 
 export async function importWorkflowTestFailures(
@@ -707,6 +812,26 @@ export async function deleteWorkflowTest(testId: string): Promise<void> {
   await request(`/api/workflow-test/${testId}`, { method: "DELETE" });
 }
 
+export async function duplicateWorkflowTest(
+  testId: string,
+  input: { agentProfileId: string; testName?: string },
+): Promise<{
+  test: {
+    id: string;
+    name: string;
+    agentProfileId: string;
+    suiteKey: string;
+    dryRun: boolean;
+    delayMs: number;
+  };
+  groups: WorkflowTestGroupRecord[];
+}> {
+  return request(`/api/workflow-test/${testId}/duplicate`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
 export async function rerunWorkflowTestFailures(
   runId: string,
   input: { dryRun?: boolean; delayMs?: number } | undefined,
@@ -729,7 +854,72 @@ export async function rerunWorkflowTestFailures(
     throw new Error(data.error ?? `Request failed (${res.status})`);
   }
 
-  await consumeWorkflowTestStream(res, handlers);
+  await consumeWorkflowTestStream(res, handlers, signal);
+}
+
+export async function resumeWorkflowTestRun(
+  runId: string,
+  input: { dryRun?: boolean; delayMs?: number } | undefined,
+  handlers: WorkflowTestHandlers,
+  signal?: AbortSignal,
+): Promise<void> {
+  const res = await fetch(`/api/workflow-test/runs/${runId}/resume`, {
+    method: "POST",
+    credentials: "include",
+    headers: {
+      "Content-Type": "application/json",
+      Accept: "text/event-stream",
+    },
+    body: JSON.stringify(input ?? {}),
+    signal,
+  });
+
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.error ?? `Request failed (${res.status})`);
+  }
+
+  await consumeWorkflowTestStream(res, handlers, signal);
+}
+
+export interface ActiveWorkflowTestRun {
+  id: string;
+  testName: string;
+  testId: string;
+  summary: WorkflowTestSummary;
+  resultCount: number;
+}
+
+export async function getActiveWorkflowTestRun(): Promise<{
+  run: ActiveWorkflowTestRun | null;
+}> {
+  return request<{ run: ActiveWorkflowTestRun | null }>(
+    "/api/workflow-test/runs/active",
+  );
+}
+
+export async function cancelWorkflowTestRun(runId: string): Promise<void> {
+  await request(`/api/workflow-test/runs/${runId}/cancel`, { method: "POST" });
+}
+
+export async function watchWorkflowTestRun(
+  runId: string,
+  handlers: WorkflowTestHandlers,
+  signal?: AbortSignal,
+): Promise<void> {
+  const res = await fetch(`/api/workflow-test/runs/${runId}/watch`, {
+    method: "GET",
+    credentials: "include",
+    headers: { Accept: "text/event-stream" },
+    signal,
+  });
+
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.error ?? `Request failed (${res.status})`);
+  }
+
+  await consumeWorkflowTestStream(res, handlers, signal);
 }
 
 export interface UsageTotals {

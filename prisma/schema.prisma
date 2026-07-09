@@ -24,18 +24,20 @@ model User {
 }
 
 model AgentProfile {
-  id             String   @id @default(cuid())
+  id             String            @id @default(cuid())
   userId         String
-  user           User     @relation("UserAgents", fields: [userId], references: [id], onDelete: Cascade)
-  activeForUsers User[]   @relation("ActiveAgent")
+  user           User              @relation("UserAgents", fields: [userId], references: [id], onDelete: Cascade)
+  activeForUsers User[]            @relation("ActiveAgent")
   name           String
-  systemPrompt   String?  @db.Text
+  systemPrompt   String?           @db.Text
   llmProvider    String?
   modelName      String?
-  apiKey         String?  @db.Text
-  baseUrl        String?  @db.Text
-  createdAt      DateTime @default(now())
-  updatedAt      DateTime @updatedAt
+  apiKey         String?           @db.Text
+  baseUrl        String?           @db.Text
+  createdAt      DateTime          @default(now())
+  updatedAt      DateTime          @updatedAt
+  workflowTests  WorkflowTest[]
+  workflowTestRuns WorkflowTestRun[]
 
   @@index([userId])
 }
@@ -86,19 +88,23 @@ model Message {
 }
 
 model WorkflowTest {
-  id        String              @id @default(cuid())
-  userId    String
-  user      User                @relation(fields: [userId], references: [id], onDelete: Cascade)
-  name      String
-  dryRun    Boolean             @default(false)
-  delayMs   Int                 @default(0)
-  createdAt DateTime            @default(now())
-  updatedAt DateTime            @updatedAt
-  groups    WorkflowTestGroup[]
-  runs      WorkflowTestRun[]
+  id             String              @id @default(cuid())
+  userId         String
+  user           User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name           String
+  agentProfileId String?
+  agentProfile   AgentProfile?       @relation(fields: [agentProfileId], references: [id], onDelete: SetNull)
+  suiteKey       String?
+  dryRun         Boolean             @default(false)
+  delayMs        Int                 @default(0)
+  createdAt      DateTime            @default(now())
+  updatedAt      DateTime            @updatedAt
+  groups         WorkflowTestGroup[]
+  runs           WorkflowTestRun[]
 
-  @@unique([userId, name])
+  @@unique([userId, name, agentProfileId])
   @@index([userId, updatedAt(sort: Desc)])
+  @@index([userId, suiteKey])
 }
 
 enum WorkflowTestGroupKind {
@@ -140,6 +146,9 @@ model WorkflowTestRun {
   user            User                @relation(fields: [userId], references: [id], onDelete: Cascade)
   workflowTestId  String
   workflowTest    WorkflowTest        @relation(fields: [workflowTestId], references: [id], onDelete: Cascade)
+  agentProfileId  String?
+  agentProfile    AgentProfile?       @relation(fields: [agentProfileId], references: [id], onDelete: SetNull)
+  agent           Json?
   testName        String
   dryRun          Boolean
   delayMs         Int

@@ -1,8 +1,10 @@
 import { Fragment, useEffect, useMemo, useState } from "react";
 import { ChevronDown, ChevronRight, Download, RotateCcw, Save } from "lucide-react";
 import type { QueryAttempt, QueryRunResult, WorkflowTestCompletePayload } from "../../api";
+import { isResumableWorkflowRun } from "../../api";
 import { getWorkflowTest, importWorkflowTestFailures } from "../../api";
 import { useWorkflowTestRunner } from "../../context/WorkflowTestRunnerContext";
+import { providerLabel } from "../../lib/llmProviders";
 import { getFailuresGroup } from "../../lib/workflowTestGroups";
 import { cn } from "../../lib/cn";
 import { Badge } from "../ui/Badge";
@@ -22,6 +24,7 @@ import {
   InspectStateTable,
   WorkflowPathPills,
 } from "./InspectBlocks";
+import { WorkflowTestMetricsDashboard } from "./WorkflowTestMetricsDashboard";
 
 interface Props {
   report: WorkflowTestCompletePayload;
@@ -251,7 +254,8 @@ function ResultInspector({ result }: { result: QueryRunResult }) {
 }
 
 export function WorkflowTestReport({ report }: Props) {
-  const { runGroup, rerunFailuresInReport, running } = useWorkflowTestRunner();
+  const { runGroup, rerunFailuresInReport, resumeFromRun, running } =
+    useWorkflowTestRunner();
   const [filter, setFilter] = useState<StatusFilter>("all");
   const [expandedKey, setExpandedKey] = useState<string | null>(null);
   const [failuresGroupId, setFailuresGroupId] = useState<string | null>(null);
@@ -261,6 +265,11 @@ export function WorkflowTestReport({ report }: Props) {
   const { summary } = report;
   const failureCount = summary.failed + summary.errors;
   const canImport = failureCount > 0 && Boolean(report.testId && report.runId);
+  const canResume = isResumableWorkflowRun(report);
+  const remainingCount = Math.max(
+    0,
+    (summary.plannedQueries ?? report.results.length) - report.results.length,
+  );
 
   useEffect(() => {
     if (!report.testId) return;
@@ -297,6 +306,15 @@ export function WorkflowTestReport({ report }: Props) {
     } finally {
       setImporting(false);
     }
+  }
+
+  async function handleResume() {
+    if (!report.runId) return;
+    await resumeFromRun(report.runId, {
+      testName: report.testName,
+      dryRun: report.dryRun,
+      delayMs: report.delayMs ?? 0,
+    });
   }
 
   async function handleRerunInReport() {
@@ -348,9 +366,28 @@ export function WorkflowTestReport({ report }: Props) {
           <p className="mt-1 text-sm text-muted-foreground">
             {new Date(report.ranAt).toLocaleString()} · {report.database.name} (
             {report.database.dbType}) · {report.dryRun ? "dry run" : "execute"}
+            {report.agent && (
+              <>
+                {" "}
+                · {report.agent.name} ({providerLabel(report.agent.llmProvider)}
+                {report.agent.modelName ? ` · ${report.agent.modelName}` : ""})
+              </>
+            )}
           </p>
         </div>
         <div className="flex flex-wrap gap-2">
+          {canResume && (
+            <Button
+              type="button"
+              variant="default"
+              size="sm"
+              disabled={running}
+              onClick={() => void handleResume()}
+            >
+              <RotateCcw className="h-4 w-4" />
+              Resume ({remainingCount} remaining)
+            </Button>
+          )}
           {canImport && (
             <Button
               type="button"
@@ -394,9 +431,19 @@ export function WorkflowTestReport({ report }: Props) {
         </div>
       </div>
 
+      {canResume && (
+        <p className="text-sm text-amber-700 dark:text-amber-400">
+          This run stopped early with {report.results.length} of{" "}
+          {summary.plannedQueries ?? report.results.length} queries completed.
+          Resume to continue from where it left off.
+        </p>
+      )}
+
       {importNotice && (
         <p className="text-sm text-muted-foreground">{importNotice}</p>
       )}
+
+      <WorkflowTestMetricsDashboard report={report} />
 
       <InspectSection title="Run summary">
         <div className="space-y-4">

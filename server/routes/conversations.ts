@@ -28,6 +28,7 @@ import {
   extractMetricsFromMessageDebug,
 } from "../extractRunMetrics.js";
 import { insertChatQueryExecution } from "../queryExecution.js";
+import { isAbortError } from "../../../utils/abort.js";
 
 type AuthUser = { id: string; username: string; createdAt: Date };
 
@@ -238,6 +239,7 @@ conversationRoutes.post("/:id/messages", async (c) => {
 
   if (!streamEvents && dryRun) {
     return streamSSE(c, async (stream) => {
+      const requestSignal = c.req.raw.signal;
       const keepAlive = startStreamKeepAlive(stream);
 
       try {
@@ -255,10 +257,13 @@ conversationRoutes.post("/:id/messages", async (c) => {
             dryRun: true,
             requestId,
             correlationId,
+            abortSignal: requestSignal,
             ...agentInputBase,
           },
           runnerOptions,
         );
+
+        if (requestSignal.aborted) return;
 
         await stream.writeSSE({
           event: "token",
@@ -292,6 +297,8 @@ conversationRoutes.post("/:id/messages", async (c) => {
           runContext,
           { generatedSql, stateHistory },
         );
+
+        if (requestSignal.aborted) return;
 
         const assistantMessage = await prisma.message.create({
           data: {
@@ -339,6 +346,7 @@ conversationRoutes.post("/:id/messages", async (c) => {
           }),
         });
       } catch (error) {
+        if (requestSignal.aborted || isAbortError(error)) return;
         const message =
           error instanceof Error ? error.message : "Agent request failed.";
         await stream.writeSSE({
@@ -356,6 +364,7 @@ conversationRoutes.post("/:id/messages", async (c) => {
   c.header("X-Accel-Buffering", "no");
 
   return streamSSE(c, async (stream) => {
+    const requestSignal = c.req.raw.signal;
     let fullResponse = "";
     const keepAlive = startStreamKeepAlive(stream);
     const collectedEvents: Array<Record<string, unknown>> = [];
@@ -380,8 +389,11 @@ conversationRoutes.post("/:id/messages", async (c) => {
         dryRun,
         requestId,
         correlationId,
+        abortSignal: requestSignal,
         ...agentInputBase,
       }, runnerOptions)) {
+        if (requestSignal.aborted) break;
+
         collectedEvents.push(event as Record<string, unknown>);
 
         if (isPublicStreamEvent(event, streamDebug)) {
@@ -412,6 +424,8 @@ conversationRoutes.post("/:id/messages", async (c) => {
           });
         }
       }
+
+      if (requestSignal.aborted) return;
 
       const generatedSql =
         generatedSqlFromStream ?? extractSqlFromMarkdown(fullResponse);
@@ -493,6 +507,7 @@ conversationRoutes.post("/:id/messages", async (c) => {
         }),
       });
     } catch (error) {
+      if (requestSignal.aborted || isAbortError(error)) return;
       const message =
         error instanceof Error ? error.message : "Agent request failed.";
       await stream.writeSSE({

@@ -6,6 +6,8 @@ import {
   setActiveAgent,
   toPublicAgent,
 } from "../userAgent.js";
+import { normalizeProviderInput } from "../llmProviders.js";
+import { validateAgentLlmFields } from "../validateAgentLlm.js";
 
 type AuthUser = { id: string; username: string; createdAt: Date };
 
@@ -16,14 +18,57 @@ interface AgentLlmBody {
   baseUrl?: string | null;
 }
 
-function normalizeProvider(value?: string | null): string | null {
-  const provider = value?.trim().toLowerCase();
-  return provider === "openai" || provider === "ollama" ? provider : null;
-}
-
 function trimToNull(value?: string | null): string | null {
   const trimmed = value?.trim();
   return trimmed ? trimmed : null;
+}
+
+function resolveProviderFields(
+  body: AgentLlmBody,
+  existing?: {
+    llmProvider?: string | null;
+    modelName?: string | null;
+    apiKey?: string | null;
+    baseUrl?: string | null;
+  },
+): { error?: string; llmProvider: string | null; modelName: string | null; baseUrl: string | null } {
+  const llmProvider =
+    body.llmProvider !== undefined
+      ? normalizeProviderInput(body.llmProvider)
+      : normalizeProviderInput(existing?.llmProvider);
+
+  if (body.llmProvider !== undefined && body.llmProvider?.trim() && !llmProvider) {
+    return {
+      error: "Unsupported LLM provider.",
+      llmProvider: null,
+      modelName: null,
+      baseUrl: null,
+    };
+  }
+
+  const modelName =
+    body.modelName !== undefined ? trimToNull(body.modelName) : existing?.modelName ?? null;
+  const baseUrl =
+    body.baseUrl !== undefined ? trimToNull(body.baseUrl) : existing?.baseUrl ?? null;
+
+  const validation = validateAgentLlmFields({
+    llmProvider,
+    modelName,
+    apiKey: body.apiKey,
+    storedApiKey: existing?.apiKey,
+    baseUrl,
+  });
+
+  if (validation.error) {
+    return {
+      error: validation.error,
+      llmProvider: validation.provider,
+      modelName: modelName,
+      baseUrl: baseUrl,
+    };
+  }
+
+  return { llmProvider, modelName, baseUrl };
 }
 
 export const agentRoutes = new Hono<{ Variables: { user: AuthUser } }>();
@@ -61,6 +106,11 @@ agentRoutes.post("/", async (c) => {
     return c.json({ error: "Name is required." }, 400);
   }
 
+  const providerFields = resolveProviderFields(body);
+  if (providerFields.error) {
+    return c.json({ error: providerFields.error }, 400);
+  }
+
   const existingCount = await prisma.agentProfile.count({
     where: { userId: user.id },
   });
@@ -70,10 +120,10 @@ agentRoutes.post("/", async (c) => {
       userId: user.id,
       name,
       systemPrompt,
-      llmProvider: normalizeProvider(body.llmProvider),
-      modelName: trimToNull(body.modelName),
+      llmProvider: providerFields.llmProvider,
+      modelName: providerFields.modelName,
       apiKey: trimToNull(body.apiKey),
-      baseUrl: trimToNull(body.baseUrl),
+      baseUrl: providerFields.baseUrl,
     },
   });
 
@@ -104,22 +154,25 @@ agentRoutes.patch("/:id", async (c) => {
     body.systemPrompt !== undefined
       ? body.systemPrompt.trim() || null
       : existing.systemPrompt;
-  const llmProvider =
-    body.llmProvider !== undefined
-      ? normalizeProvider(body.llmProvider)
-      : existing.llmProvider;
-  const modelName =
-    body.modelName !== undefined ? trimToNull(body.modelName) : existing.modelName;
-  const baseUrl =
-    body.baseUrl !== undefined ? trimToNull(body.baseUrl) : existing.baseUrl;
-  // Only overwrite the stored key when a non-empty value is provided so the
-  // client can leave the field blank to keep the existing key.
+
+  const providerFields = resolveProviderFields(body, existing);
+  if (providerFields.error) {
+    return c.json({ error: providerFields.error }, 400);
+  }
+
   const trimmedApiKey = body.apiKey?.trim();
   const apiKey = trimmedApiKey ? trimmedApiKey : existing.apiKey;
 
   const agent = await prisma.agentProfile.update({
     where: { id },
-    data: { name, systemPrompt, llmProvider, modelName, baseUrl, apiKey },
+    data: {
+      name,
+      systemPrompt,
+      llmProvider: providerFields.llmProvider,
+      modelName: providerFields.modelName,
+      baseUrl: providerFields.baseUrl,
+      apiKey,
+    },
   });
 
   return c.json({ agent: toPublicAgent(agent) });

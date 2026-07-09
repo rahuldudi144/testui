@@ -56,13 +56,36 @@ if (isProduction()) {
 }
 
 const env = loadEnv();
+const port = env.TESTUI_PORT;
 
-console.log(`DB-Agent test UI API listening on http://localhost:${env.TESTUI_PORT}`);
+const serverHolderKey = Symbol.for("db-agent-testui.server");
+type ServerHolder = { server?: ReturnType<typeof Bun.serve> };
+const serverHolder: ServerHolder =
+  (globalThis as typeof globalThis & Record<symbol, ServerHolder>)[
+    serverHolderKey
+  ] ??= {};
 
-export default {
-  port: env.TESTUI_PORT,
+serverHolder.server?.stop(true);
+
+const server = Bun.serve({
+  port,
   fetch: app.fetch,
   // Agent runs (schema fetch + validation retries + LLM calls) can exceed 10s
   // before the first SSE chunk is written. Bun defaults to 10s idleTimeout.
   idleTimeout: 255,
-};
+  // Avoid Bun's default-export HMR path, which can leave :4000 bound on reload.
+  development: { hmr: false },
+});
+
+serverHolder.server = server;
+
+console.log(`DB-Agent test UI API listening on http://localhost:${server.port}`);
+
+if (import.meta.hot) {
+  import.meta.hot.dispose(() => {
+    server.stop(true);
+    if (serverHolder.server === server) {
+      serverHolder.server = undefined;
+    }
+  });
+}

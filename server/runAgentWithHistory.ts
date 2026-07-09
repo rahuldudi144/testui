@@ -37,6 +37,7 @@ import type { ObservabilityContext } from "../../observability/types.js";
 import { loggerFromStructured } from "../../utils/logger.js";
 import type { Logger } from "../../utils/logger.js";
 import { AgentError, errorMessage } from "../../utils/errors.js";
+import { isAbortError, throwIfAborted } from "../../utils/abort.js";
 import { resolveInvocationSystemPrompt } from "../../prompts/composeSystemMessage.js";
 import { extractText } from "../../nodes/shared.js";
 import { buildConfig, createAgent } from "./agent.js";
@@ -88,6 +89,7 @@ class AgentRunner {
     input: InvokeInput,
   ): AsyncGenerator<string, StateHistoryEntry[]> {
     validateInput(input);
+    throwIfAborted(input.abortSignal);
     const observability = this.createObservability(input);
     const logger = loggerFromStructured(observability.logger);
     const tags = metricTags(observability);
@@ -111,12 +113,14 @@ class AgentRunner {
           ),
         },
         streamMode: ["messages", "values"],
+        signal: input.abortSignal,
       });
 
       let streamedAnything = false;
       let finalMarkdown = "";
 
       for await (const chunk of stream) {
+        throwIfAborted(input.abortSignal);
         const [mode, payload] = chunk as [string, unknown];
 
         if (mode === "messages") {
@@ -146,6 +150,10 @@ class AgentRunner {
       observability.logger.info({ event: "stream_completed" });
     } catch (error) {
       caughtError = error;
+      if (isAbortError(error)) {
+        observability.logger.info({ event: "request_aborted" });
+        throw error;
+      }
       observability.metrics.increment("agent.requests.failed", tags);
       observability.logger.error({
         event: "stream_failed",
@@ -185,6 +193,7 @@ class AgentRunner {
 
     observability.metrics.increment("agent.requests.total", tags);
     observability.logger.info({ event: "invoke_start" });
+    throwIfAborted(input.abortSignal);
 
     let success = false;
     let caughtError: unknown;
@@ -201,6 +210,7 @@ class AgentRunner {
             observability,
           ),
         },
+        signal: input.abortSignal,
       })) as AgentState;
 
       success = true;
@@ -208,6 +218,10 @@ class AgentRunner {
       return { finalState, observability };
     } catch (error) {
       caughtError = error;
+      if (isAbortError(error)) {
+        observability.logger.info({ event: "request_aborted" });
+        throw error;
+      }
       observability.metrics.increment("agent.requests.failed", tags);
       observability.logger.error({
         event: "invoke_failed",
@@ -366,6 +380,7 @@ export async function* streamAgentEvents(
         ...input,
         streamEvents: true,
         debug: true,
+        abortSignal: input.abortSignal,
       })) {
         drainLogs();
         pending.push(
@@ -385,6 +400,7 @@ export async function* streamAgentEvents(
 
   try {
     while (!agentDone || pending.length > 0) {
+      throwIfAborted(input.abortSignal);
       drainLogs();
       if (pending.length > 0) {
         yield pending.shift()!;

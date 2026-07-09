@@ -1,5 +1,6 @@
 import type { InvokeResult } from "../../types/index.js";
 import type { StateHistoryEntry } from "../../schemas/state.js";
+import { AgentError, errorMessage } from "../../utils/errors.js";
 
 export type StressRunStatus = "pass" | "fail" | "error" | "planner_skip";
 
@@ -42,6 +43,17 @@ export interface QueryRunResult {
   executionCount?: number;
 }
 
+export type WorkflowRunStatus =
+  | "running"
+  | "completed"
+  | "partial"
+  | "cancelled";
+
+export interface PlannedQueryItem {
+  groupName: string;
+  query: string;
+}
+
 export interface StressTestSummary {
   total: number;
   passed: number;
@@ -58,6 +70,9 @@ export interface StressTestSummary {
   completionTokens?: number;
   totalTokens?: number;
   llmCallCount?: number;
+  runStatus?: WorkflowRunStatus;
+  plannedQueries?: number;
+  plannedItems?: PlannedQueryItem[];
 }
 
 interface WorkflowSummary {
@@ -119,6 +134,37 @@ function parseStateHistory(value: unknown): StateHistoryEntry[] {
 
 function normalizeNodeId(node: string): string {
   return node === "getSchema" ? "schemaResolver" : node;
+}
+
+/** Format agent failures for workflow test result rows. */
+export function formatWorkflowAgentError(error: unknown): string {
+  if (error instanceof AgentError) {
+    if (error.code === "MODEL_NOT_SUPPORTED") {
+      return "The selected model does not support structured output for this node.";
+    }
+    return `${error.code}: ${error.message}`;
+  }
+  return errorMessage(error);
+}
+
+function failurePhaseForNode(node: string | undefined): FailurePhase {
+  if (!node) return "agent_error";
+  if (node === "planner") return "planner";
+  if (node === "runQuery") return "execution";
+  if (node === "formatResponse") return "verification";
+  if (
+    node === "buildQuery" ||
+    node === "validateQuery" ||
+    node === "repairQuery" ||
+    node === "operationPlanner" ||
+    node === "entityExtractor" ||
+    node === "pathFinder" ||
+    node === "graphBuilder" ||
+    node === "schemaResolver"
+  ) {
+    return "query_build";
+  }
+  return "agent_error";
 }
 
 function lastVisitForNode(
@@ -210,12 +256,19 @@ function responseTextFromNode(
   return undefined;
 }
 
+function formatResponseFailed(history: StateHistoryEntry[]): string | undefined {
+  const visit = lastVisitForNode(history, "formatResponse");
+  const error = visit?.changes.formatResponseError;
+  return typeof error === "string" && error.trim().length > 0 ? error.trim() : undefined;
+}
+
 function resolveFailedNodeForResponse(
   failedNode: string | undefined,
   failurePhase: FailurePhase,
   path: string[],
 ): string | undefined {
   if (failedNode) return failedNode;
+  if (failurePhase === "verification") return "formatResponse";
   if (failurePhase === "execution") return "runQuery";
   if (failurePhase === "query_build") return "validateQuery";
   if (path.at(-1) === "answer") return "answer";
@@ -338,6 +391,10 @@ function detectFailurePhase(params: {
     return "execution";
   }
 
+  if (formatResponseFailed(history)) {
+    return "verification";
+  }
+
   return "none";
 }
 
@@ -375,12 +432,43 @@ export function analyzeStressRunResult(params: {
   };
 
   if (errorMessage) {
-    return {
-      ...base,
-      status: "error",
-      failurePhase: "agent_error",
-      errorMessage,
-    };
+    const debugRecord = asRecord(debug);
+    const workflow = (asRecord(debugRecord?.workflow) ?? {}) as WorkflowSummary;
+    const graph = asRecord(debugRecord?.graph);
+    const metrics = asRecord(debugRecord?.metrics);
+    const history = parseStateHistory(debugRecord?.stateHistory);
+
+    const graphNodes = Array.isArray(graph?.nodes)
+      ? (graph.nodes as GraphNodeSummary[])
+      : [];
+    const path = Array.isArray(graph?.path)
+      ? (graph.path as string[]).map(normalizeNodeId)
+      : history.map((e) => normalizeNodeId(e.node));
+
+    const metricsTimeline = Array.isArray(metrics?.nodeTimeline)
+      ? (metrics.nodeTimeline as Array<{ node?: string; event?: string }>)
+      : [];
+
+    const failedNode = findFailedNode(graphNodes, metricsTimeline);
+    const failurePhase = failurePhaseForNode(failedNode);
+
+    return attachFailureDetails(
+      {
+        ...base,
+        status: "error",
+        failurePhase,
+        errorMessage,
+        workflowPath: path.length > 0 ? path : undefined,
+        workflowStatus: workflow.status,
+      },
+      {
+        failedNode,
+        failurePhase,
+        path,
+        graphNodes,
+        history,
+      },
+    );
   }
 
   const debugRecord = asRecord(debug);
@@ -438,11 +526,13 @@ export function analyzeStressRunResult(params: {
   const validationFailed = workflow.validationPassed === false;
   const traceFailed = workflow.status === "failed";
   const executionFailed = !dryRun && executionOk === false;
+  const formatFailed = Boolean(formatResponseFailed(history));
 
   const passed =
     !traceFailed &&
     !validationFailed &&
     !executionFailed &&
+    !formatFailed &&
     failurePhase === "none";
 
   const resolvedPhase = passed

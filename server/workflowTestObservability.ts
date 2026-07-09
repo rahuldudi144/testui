@@ -47,6 +47,12 @@ export interface WorkflowTestReportPayload {
   delayMs?: number;
   database: { dbType: string; name: string; host: string };
   ranAt: string;
+  agent?: {
+    id: string;
+    name: string;
+    llmProvider: string | null;
+    modelName: string | null;
+  };
   summary: StressTestSummary;
   results: QueryRunResult[];
 }

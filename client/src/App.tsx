@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import {
   createConversation,
   deleteConversation,
@@ -37,14 +38,18 @@ import { Alert } from "./components/ui/Alert";
 import { Button } from "./components/ui/Button";
 import { EmptyState } from "./components/ui/EmptyState";
 import { useIsDesktop, useIsTabletUp } from "./lib/useMediaQuery";
+import { useAbortOnPageLeave } from "./lib/useAbortOnPageLeave";
 import { MessageSquarePlus } from "lucide-react";
 
-type AppView = "chat" | "settings" | "workflowTest";
-
-export default function App() {
-  const [view, setView] = useState<AppView>("chat");
-  const [user, setUser] = useState<User | null>(null);
-  const [loading, setLoading] = useState(true);
+function AuthenticatedApp({
+  user,
+  onLogout,
+}: {
+  user: User;
+  onLogout: () => Promise<void>;
+}) {
+  const navigate = useNavigate();
+  const location = useLocation();
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [activeConversationId, setActiveConversationId] = useState<
     string | null
@@ -70,9 +75,17 @@ export default function App() {
   const [showDebug, setShowDebug] = useState(true);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [debugSheetOpen, setDebugSheetOpen] = useState(false);
+  const abortRef = useRef<AbortController | null>(null);
 
   const isDesktop = useIsDesktop();
   const isTabletUp = useIsTabletUp();
+  const isChat = location.pathname.startsWith("/chat");
+  const isSettings = location.pathname.startsWith("/settings");
+  const isTests = location.pathname.startsWith("/tests");
+  const chatMatch = location.pathname.match(/^\/chat(?:\/([^/]+))?$/);
+  const urlConversationId = chatMatch?.[1] ?? null;
+
+  useAbortOnPageLeave(() => abortRef.current);
 
   const activeConversation =
     conversations.find((c) => c.id === activeConversationId) ?? null;
@@ -120,41 +133,60 @@ export default function App() {
   );
 
   useEffect(() => {
+    if (location.pathname === "/") {
+      navigate("/chat", { replace: true });
+      return;
+    }
+    if (location.pathname === "/test" || location.pathname === "/workflow-test") {
+      navigate("/tests", { replace: true });
+      return;
+    }
+    if (location.pathname === "/settings") {
+      navigate("/settings/database", { replace: true });
+      return;
+    }
+    if (!isChat && !isSettings && !isTests) {
+      navigate("/chat", { replace: true });
+    }
+  }, [location.pathname, navigate, isChat, isSettings, isTests]);
+
+  useEffect(() => {
+    if (urlConversationId && urlConversationId !== activeConversationId) {
+      setActiveConversationId(urlConversationId);
+    }
+  }, [urlConversationId, activeConversationId]);
+
+  useEffect(() => {
+    if (location.pathname === "/chat" && activeConversationId && !urlConversationId) {
+      navigate(`/chat/${activeConversationId}`, { replace: true });
+    }
+  }, [location.pathname, activeConversationId, urlConversationId, navigate]);
+
+  useEffect(() => {
     let cancelled = false;
 
-    async function initSession() {
+    async function initWorkspace() {
       try {
-        const u = await fetchMe();
-        if (cancelled) return;
-        setUser(u);
-        if (!u) return;
-
-        try {
-          await Promise.all([refreshDatabase(), refreshAgent()]);
-          const list = await refreshConversations();
-          await ensureActiveConversation(list);
-        } catch (err) {
-          if (!cancelled) {
-            setError(
-              err instanceof Error ? err.message : "Failed to load workspace.",
-            );
-          }
+        await Promise.all([refreshDatabase(), refreshAgent()]);
+        const list = await refreshConversations();
+        await ensureActiveConversation(list);
+      } catch (err) {
+        if (!cancelled) {
+          setError(
+            err instanceof Error ? err.message : "Failed to load workspace.",
+          );
         }
-      } catch {
-        if (!cancelled) setUser(null);
-      } finally {
-        if (!cancelled) setLoading(false);
       }
     }
 
-    void initSession();
+    void initWorkspace();
     return () => {
       cancelled = true;
     };
   }, [refreshConversations, refreshDatabase, refreshAgent, ensureActiveConversation]);
 
   useEffect(() => {
-    if (!activeConversationId || view !== "chat") {
+    if (!activeConversationId || !isChat) {
       return;
     }
 
@@ -184,27 +216,10 @@ export default function App() {
         ),
       )
       .finally(() => setLoadingMessages(false));
-  }, [activeConversationId, view]);
-
-  async function handleLogin(email: string, password: string) {
-    const u = await login(email, password);
-    setUser(u);
-    await refreshDatabase();
-    const list = await refreshConversations();
-    await ensureActiveConversation(list);
-    setView("chat");
-  }
+  }, [activeConversationId, isChat]);
 
   async function handleLogout() {
-    await logout();
-    setUser(null);
-    setConversations([]);
-    setActiveConversationId(null);
-    setMessages([]);
-    setSearch("");
-    setActiveDatabase(null);
-    setLastDebug(null);
-    setView("chat");
+    await onLogout();
   }
 
   async function handleNewConversation() {
@@ -216,7 +231,7 @@ export default function App() {
     setConversations((prev) => [withCount, ...prev]);
     setActiveConversationId(withCount.id);
     setError(null);
-    setView("chat");
+    navigate(`/chat/${withCount.id}`);
     setSidebarOpen(false);
   }
 
@@ -226,10 +241,12 @@ export default function App() {
     if (list.length === 0) {
       setActiveConversationId(null);
       setMessages([]);
+      navigate("/chat");
       return;
     }
     if (activeConversationId === id) {
       setActiveConversationId(list[0].id);
+      navigate(`/chat/${list[0].id}`);
     }
   }
 
@@ -255,8 +272,16 @@ export default function App() {
     };
     setMessages((prev) => [...prev, optimistic]);
 
+    abortRef.current?.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
+
     try {
-      await sendMessage(activeConversationId, query, dryRun, {
+      await sendMessage(
+        activeConversationId,
+        query,
+        dryRun,
+        {
         onStatus: (meta) => {
           if (meta.requestId) setActiveRequestId(meta.requestId);
           if (meta.message) {
@@ -288,12 +313,27 @@ export default function App() {
           await refreshConversations();
         },
         onError: (message) => setError(message),
-      }, {
-        debug: showDebug,
-      });
+      },
+        {
+          debug: showDebug,
+        },
+        controller.signal,
+      );
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to send message.");
-      setMessages((prev) => prev.filter((m) => m.id !== optimistic.id));
+      if (err instanceof DOMException && err.name === "AbortError") {
+        setStreamingContent("");
+        setStreamProgress(initialStreamProgress());
+        setLiveStreamEvents([]);
+        try {
+          const updated = await fetchMessages(activeConversationId);
+          setMessages(updated);
+        } catch {
+          // Keep optimistic user message if sync fails.
+        }
+      } else {
+        setError(err instanceof Error ? err.message : "Failed to send message.");
+        setMessages((prev) => prev.filter((m) => m.id !== optimistic.id));
+      }
     } finally {
       setSending(false);
       setStreamingContent("");
@@ -316,20 +356,12 @@ export default function App() {
 
   function handleSelectConversation(id: string) {
     setActiveConversationId(id);
-    setView("chat");
+    navigate(`/chat/${id}`);
     setSidebarOpen(false);
   }
 
-  if (loading) {
-    return <AppLoadingSkeleton />;
-  }
-
-  if (!user) {
-    return <LoginForm onLogin={handleLogin} />;
-  }
-
   const openWorkflowTest = () => {
-    setView("workflowTest");
+    navigate("/tests");
     setSidebarOpen(false);
   };
 
@@ -345,7 +377,7 @@ export default function App() {
       onDelete={handleDeleteConversation}
       onLogout={handleLogout}
       onOpenSettings={() => {
-        setView("settings");
+        navigate("/settings/database");
         setSidebarOpen(false);
       }}
       onOpenWorkflowTest={openWorkflowTest}
@@ -364,10 +396,16 @@ export default function App() {
 
   return (
     <WorkflowTestRunnerProvider dbConfigured={!!activeDatabase}>
+      <Routes>
+        <Route path="/" element={<Navigate to="/chat" replace />} />
+        <Route path="/test" element={<Navigate to="/tests" replace />} />
+        <Route path="/workflow-test" element={<Navigate to="/tests" replace />} />
+        <Route path="/settings" element={<Navigate to="/settings/database" replace />} />
+      </Routes>
       <AppShell
         sidebar={sidebarNode}
-        showDebug={view === "chat" && showDebug}
-        debugPanel={view === "chat" ? debugNode : undefined}
+        showDebug={isChat && showDebug}
+        debugPanel={isChat ? debugNode : undefined}
         sidebarOpen={sidebarOpen}
         onSidebarOpenChange={setSidebarOpen}
         debugSheetOpen={debugSheetOpen}
@@ -380,18 +418,18 @@ export default function App() {
         main={
           <MainContent>
             <WorkflowTestGlobalStatus onOpenWorkflowTest={openWorkflowTest} />
-            {view === "settings" ? (
+            {isSettings ? (
             <SettingsPage
               user={user}
-              onBack={() => setView("chat")}
+              onBack={() => navigate("/chat")}
               onDatabaseChange={refreshDatabase}
               onAgentChange={refreshAgent}
             />
-          ) : view === "workflowTest" ? (
+          ) : isTests ? (
             <WorkflowTestPage
-              onBack={() => setView("chat")}
+              onBack={() => navigate("/chat")}
               dbConfigured={!!activeDatabase}
-              onOpenSettings={() => setView("settings")}
+              onOpenSettings={() => navigate("/settings/database")}
             />
           ) : (
             <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
@@ -406,12 +444,12 @@ export default function App() {
                     hasBusinessContext={activeDatabase?.hasBusinessContext}
                     activeAgentName={activeAgent?.name}
                     agentHasSystemPrompt={activeAgent?.hasSystemPrompt}
-                    onConfigure={() => setView("settings")}
+                    onConfigure={() => navigate("/settings/database")}
                   />
                 }
                 showMenuButton={!isTabletUp}
                 onMenuClick={() => setSidebarOpen(true)}
-                showDebug={view === "chat"}
+                showDebug={isChat}
                 onToggleDebug={handleToggleDebug}
                 debugOpen={showDebug && (isDesktop || debugSheetOpen)}
               />
@@ -424,7 +462,7 @@ export default function App() {
                         Configure a database connection in{" "}
                         <button
                           type="button"
-                          onClick={() => setView("settings")}
+                          onClick={() => navigate("/settings/database")}
                           className="font-medium underline underline-offset-2 focus-ring rounded-sm"
                         >
                           Settings
@@ -447,7 +485,7 @@ export default function App() {
                   streamingContent={streamingContent}
                   streamProgress={streamProgress}
                   dbConfigured={!!activeDatabase}
-                  onOpenSettings={() => setView("settings")}
+                  onOpenSettings={() => navigate("/settings/database")}
                   onSelectDebug={(debug) => {
                     setLastDebug(debug);
                     setShowDebug(true);
@@ -479,4 +517,51 @@ export default function App() {
       />
     </WorkflowTestRunnerProvider>
   );
+}
+
+export default function App() {
+  const navigate = useNavigate();
+  const [user, setUser] = useState<User | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function initSession() {
+      try {
+        const u = await fetchMe();
+        if (!cancelled) setUser(u);
+      } catch {
+        if (!cancelled) setUser(null);
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    }
+
+    void initSession();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  async function handleLogin(email: string, password: string) {
+    const u = await login(email, password);
+    setUser(u);
+    navigate("/chat");
+  }
+
+  async function handleLogout() {
+    await logout();
+    setUser(null);
+  }
+
+  if (loading) {
+    return <AppLoadingSkeleton />;
+  }
+
+  if (!user) {
+    return <LoginForm onLogin={handleLogin} />;
+  }
+
+  return <AuthenticatedApp user={user} onLogout={handleLogout} />;
 }
