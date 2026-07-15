@@ -2,7 +2,6 @@ import {
   createContext,
   useCallback,
   useContext,
-  useEffect,
   useMemo,
   useRef,
   useState,
@@ -11,14 +10,12 @@ import {
 import { flushSync } from "react-dom";
 import {
   cancelWorkflowTestRun,
-  getActiveWorkflowTestRun,
   getWorkflowTest,
   getWorkflowTestRun,
   rerunWorkflowTestFailures,
   resumeWorkflowTestRun,
   runWorkflowTest,
   runWorkflowTestGroup,
-  watchWorkflowTestRun,
   type QueryRunResult,
   type WorkflowTestCompletePayload,
 } from "../api";
@@ -229,7 +226,6 @@ export function WorkflowTestRunnerProvider({
   const abortRef = useRef<AbortController | null>(null);
   const runGenerationRef = useRef(0);
   const streamCompletedRef = useRef(false);
-  const reconnectAttemptedRef = useRef(false);
 
   const appendActivity = useCallback((message: string) => {
     setLatestActivity(message);
@@ -523,75 +519,8 @@ export function WorkflowTestRunnerProvider({
     abortRef.current.abort();
   }, [activeRunId]);
 
-  useEffect(() => {
-    if (!dbConfigured || reconnectAttemptedRef.current) return;
-    reconnectAttemptedRef.current = true;
-
-    let cancelled = false;
-
-    async function reconnectToActiveRun() {
-      try {
-        const storedRunId = sessionStorage.getItem(ACTIVE_RUN_STORAGE_KEY);
-        const active = await getActiveWorkflowTestRun();
-        const runId = storedRunId ?? active.run?.id;
-        if (!runId || cancelled) return;
-
-        const report = await getWorkflowTestRun(runId);
-        if (report.summary.runStatus !== "running") {
-          sessionStorage.removeItem(ACTIVE_RUN_STORAGE_KEY);
-          return;
-        }
-
-        setTestName(report.testName);
-        setReport(report);
-        setLiveResults(report.results);
-        setActiveRunId(runId);
-        const plannedTotal =
-          report.summary.plannedQueries ?? report.results.length;
-        setProgress({
-          groupName: "",
-          query: "",
-          queryIndex: report.results.length,
-          totalQueries: plannedTotal,
-          completedQueries: report.results.length,
-        });
-
-        const { controller, generation } = beginRun({ keepReport: true });
-        const isActiveRun = () => generation === runGenerationRef.current;
-
-        try {
-          await watchWorkflowTestRun(
-            runId,
-            createStreamHandlers(
-              isActiveRun,
-              setTestId,
-              setProgress,
-              setLiveResults,
-              setReport,
-              setShowCompletedBanner,
-              setSavedRefreshToken,
-              setError,
-              appendActivity,
-              streamCompletedRef,
-              setActiveRunId,
-            ),
-            controller.signal,
-          );
-        } finally {
-          if (isActiveRun()) {
-            finishRun(controller);
-          }
-        }
-      } catch {
-        // ignore reconnect failures
-      }
-    }
-
-    void reconnectToActiveRun();
-    return () => {
-      cancelled = true;
-    };
-  }, [appendActivity, beginRun, dbConfigured, finishRun]);
+  // Do not auto-reconnect / resume workflow tests on app load or refresh.
+  // Runs only continue when the user explicitly clicks Run / Resume.
 
   const clearError = useCallback(() => setError(null), []);
 

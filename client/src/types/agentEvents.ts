@@ -1,9 +1,10 @@
 export type GraphNodeName =
   | "planner"
-  | "schemaResolver"
-  | "graphBuilder"
+  | "knowledgeLoader"
   | "entityExtractor"
+  | "semanticSearch"
   | "pathFinder"
+  | "knowledgeExpansion"
   | "operationPlanner"
   | "buildQuery"
   | "validateQuery"
@@ -36,11 +37,6 @@ export type ValidationFailedEvent = {
 export type QueryExecutedEvent = {
   type: "query_executed";
   rowCount: number;
-};
-
-export type AnswerVerificationEvent = {
-  type: "answer_verification";
-  answered: boolean;
 };
 
 export type TokenEvent = {
@@ -83,6 +79,23 @@ export type DebugEvent = {
   data: unknown;
 };
 
+export type KnowledgeProgressEvent = {
+  type: "knowledge_progress";
+  table: string;
+  completed: number;
+  total: number;
+};
+
+export type KnowledgeCompletedEvent = {
+  type: "knowledge_completed";
+};
+
+export type KnowledgeFailedEvent = {
+  type: "knowledge_failed";
+  table: string;
+  error: string;
+};
+
 export type AgentEvent =
   | StatusEvent
   | NodeStartEvent
@@ -90,14 +103,16 @@ export type AgentEvent =
   | SqlGeneratedEvent
   | ValidationFailedEvent
   | QueryExecutedEvent
-  | AnswerVerificationEvent
   | LlmUsageEvent
   | TokenEvent
   | DebugEvent
   | ErrorEvent
-  | DoneEvent;
+  | DoneEvent
+  | KnowledgeProgressEvent
+  | KnowledgeCompletedEvent
+  | KnowledgeFailedEvent;
 
-export function isAgentEvent(value: unknown): value is AgentEvent {
+export function isAgentEvent(value: unknown): boolean {
   return (
     value !== null &&
     typeof value === "object" &&

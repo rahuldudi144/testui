@@ -105,11 +105,13 @@ export function DbSubtitle({
   if (name && dbType) {
     const metaParts: string[] = [];
     if (schemaSyncStatus === "ready" && (schemaTableCount ?? 0) > 0) {
-      metaParts.push(`${schemaTableCount} tables`);
+      metaParts.push(`${schemaTableCount} tables indexed`);
     } else if (schemaSyncStatus === "syncing") {
-      metaParts.push("syncing schema");
+      metaParts.push("indexing knowledge");
     } else if (schemaSyncStatus === "failed") {
-      metaParts.push("schema sync failed");
+      metaParts.push("knowledge index failed");
+    } else if (schemaSyncStatus === "idle") {
+      metaParts.push("not indexed");
     }
     if (hasBusinessContext) {
       metaParts.push("context set");

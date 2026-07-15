@@ -25,8 +25,12 @@ function eventBadgeVariant(
     case "error":
       return "destructive";
     case "query_executed":
-    case "answer_verification":
       return "default";
+    case "knowledge_progress":
+    case "knowledge_completed":
+      return "info";
+    case "knowledge_failed":
+      return "destructive";
     case "token":
       return "outline";
     case "llm_usage":
@@ -45,8 +49,12 @@ function formatEventSummary(event: AgentEvent): string {
       return `${event.errors.length} error${event.errors.length === 1 ? "" : "s"}`;
     case "query_executed":
       return `${event.rowCount} rows`;
-    case "answer_verification":
-      return event.answered ? "satisfied" : "not satisfied";
+    case "knowledge_progress":
+      return `${event.table} (${event.completed}/${event.total})`;
+    case "knowledge_completed":
+      return "indexing complete";
+    case "knowledge_failed":
+      return `${event.table}: ${event.error}`;
     case "sql_generated":
       return `${event.sql.length} chars`;
     case "token":

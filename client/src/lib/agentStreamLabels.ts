@@ -2,10 +2,11 @@ import type { GraphNodeName } from "../types/agentEvents";
 
 const NODE_LABELS: Record<GraphNodeName, string> = {
   planner: "Planning",
-  schemaResolver: "Loading schema",
-  graphBuilder: "Building relationship graph",
-  entityExtractor: "Identifying entities",
+  knowledgeLoader: "Loading knowledge",
+  entityExtractor: "Extracting business concepts",
+  semanticSearch: "Semantic search",
   pathFinder: "Finding join paths",
+  knowledgeExpansion: "Expanding knowledge",
   operationPlanner: "Planning operations",
   buildQuery: "Generating SQL",
   validateQuery: "Validating SQL",
@@ -15,6 +16,6 @@ const NODE_LABELS: Record<GraphNodeName, string> = {
   answer: "Answering",
 };
 
-export function nodeStreamLabel(node: GraphNodeName): string {
-  return NODE_LABELS[node] ?? node;
+export function nodeStreamLabel(node: GraphNodeName | string): string {
+  return NODE_LABELS[node as GraphNodeName] ?? node;
 }

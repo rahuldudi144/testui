@@ -39,7 +39,7 @@ describe("analyzeStressRunResult formatResponse failures", () => {
           },
         ],
         graph: {
-          path: ["planner", "schemaResolver", "buildQuery", "validateQuery", "runQuery", "formatResponse"],
+          path: ["planner", "knowledgeLoader", "buildQuery", "validateQuery", "runQuery", "formatResponse"],
           nodes: [],
         },
       },
@@ -66,7 +66,7 @@ describe("analyzeStressRunResult formatResponse failures", () => {
           ],
         },
         graph: {
-          path: ["planner", "schemaResolver", "entityExtractor"],
+          path: ["planner", "knowledgeLoader", "entityExtractor"],
           nodes: [],
         },
       },

@@ -34,6 +34,10 @@ model AgentProfile {
   modelName      String?
   apiKey         String?           @db.Text
   baseUrl        String?           @db.Text
+  embeddingProvider  String?
+  embeddingModelName String?
+  embeddingApiKey    String?           @db.Text
+  embeddingBaseUrl   String?           @db.Text
   createdAt      DateTime          @default(now())
   updatedAt      DateTime          @updatedAt
   workflowTests  WorkflowTest[]
@@ -50,7 +54,10 @@ model DatabaseConnection {
   name             String
   dbType           String
   dbUri            String    @db.Text
+  /** Optional override; falls back to env KNOWLEDGE_DB_URI. */
+  knowledgeDbUri   String?   @db.Text
   businessContext  String?   @db.Text
+  /** Cached live schema JSON used for preview / schemaHash. */
   dbMetadata       Json?
   schemaSyncedAt   DateTime?
   schemaSyncStatus String    @default("idle")

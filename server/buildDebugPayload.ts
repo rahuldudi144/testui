@@ -1,7 +1,7 @@
 import { randomUUID } from "crypto";
 import type { Prisma } from "@prisma/client";
 import type { InvokeResult } from "../../types/index.js";
-import type { StateHistoryEntry } from "../../schemas/state.js";
+import type { StateHistoryEntry } from "../../types/index.js";
 import { finalizeRequestDebug } from "./debugCapture.js";
 import {
   parseMetricsFromLogs,
@@ -18,6 +18,7 @@ interface ActiveDbInfo {
   schemaTableCount?: number;
   metadataSource?: "stored" | "live";
   hasBusinessContext?: boolean;
+  hasKnowledgeIndexed?: boolean;
 }
 
 export function createAgentRequestIds(conversationId: string): {
@@ -77,6 +78,7 @@ export function buildFullDebugPayload(
       schemaTableCount: activeDb.schemaTableCount,
       metadataSource: activeDb.metadataSource,
       hasBusinessContext: activeDb.hasBusinessContext,
+      hasKnowledgeIndexed: activeDb.hasKnowledgeIndexed,
     },
     input: runContext.input,
     output: runContext.output,

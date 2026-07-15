@@ -1,5 +1,6 @@
 import { Hono } from "hono";
-import type { Prisma } from "@prisma/client";
+import { streamSSE } from "hono/streaming";
+import { Prisma } from "@prisma/client";
 import { prisma } from "../db.js";
 import { authMiddleware } from "./auth.js";
 import {
@@ -8,11 +9,14 @@ import {
   setActiveDatabase,
   toPublicDatabase,
   validateDbType,
+  resolveKnowledgeDbUri,
 } from "../userDatabase.js";
-import { syncConnectionSchema, fetchAndParseConnectionSchema } from "../syncConnectionSchema.js";
-import { getActiveAgentForUser, profileAgentConfig } from "../userAgent.js";
+import {
+  indexConnectionKnowledge,
+} from "../indexConnectionKnowledge.js";
 import { testDatabaseConnection } from "../agent.js";
 import { errorMessage } from "../../../utils/errors.js";
+import { isAbortError } from "../../../utils/abort.js";
 
 type AuthUser = { id: string; username: string; createdAt: Date };
 
@@ -42,17 +46,16 @@ databaseRoutes.post("/", async (c) => {
     name?: string;
     dbType?: string;
     dbUri?: string;
+    knowledgeDbUri?: string;
     businessContext?: string;
     setActive?: boolean;
-    fetchSchema?: boolean;
-    dbMetadata?: unknown;
   }>();
 
   const name = body.name?.trim();
   const dbUri = body.dbUri?.trim();
   const dbType = body.dbType?.trim();
+  const knowledgeDbUri = body.knowledgeDbUri?.trim() || null;
   const businessContext = body.businessContext?.trim() || null;
-  const fetchSchema = body.fetchSchema ?? true;
 
   if (!name || !dbUri || !dbType) {
     return c.json({ error: "Name, dbType, and dbUri are required." }, 400);
@@ -79,42 +82,14 @@ databaseRoutes.post("/", async (c) => {
       name,
       dbType,
       dbUri,
+      knowledgeDbUri,
       businessContext,
-      schemaSyncStatus: fetchSchema ? "syncing" : "idle",
+      schemaSyncStatus: "idle",
     },
   });
 
   if (body.setActive ?? existingCount === 0) {
     await setActiveDatabase(user.id, connection.id);
-  }
-
-  if (fetchSchema) {
-    try {
-      if (body.dbMetadata !== undefined) {
-        await prisma.databaseConnection.update({
-          where: { id: connection.id },
-          data: {
-            dbMetadata: body.dbMetadata as Prisma.InputJsonValue,
-            schemaSyncedAt: new Date(),
-            schemaSyncStatus: "ready",
-            schemaSyncError: null,
-          },
-        });
-      } else {
-        await syncConnectionSchema(connection.id, user.id);
-      }
-    } catch (error) {
-      const updated = await prisma.databaseConnection.findUnique({
-        where: { id: connection.id },
-      });
-      return c.json(
-        {
-          database: toPublicDatabase(updated ?? connection),
-          warning: `Connection saved but schema sync failed: ${errorMessage(error)}`,
-        },
-        201,
-      );
-    }
   }
 
   const saved = await prisma.databaseConnection.findUnique({
@@ -125,37 +100,13 @@ databaseRoutes.post("/", async (c) => {
 });
 
 databaseRoutes.post("/preview-schema", async (c) => {
-  const user = c.get("user");
-  const body = await c.req.json<{ dbType?: string; dbUri?: string }>();
-  const dbUri = body.dbUri?.trim();
-  const dbType = body.dbType?.trim();
-
-  if (!dbUri || !dbType) {
-    return c.json({ error: "dbType and dbUri are required." }, 400);
-  }
-  if (!validateDbType(dbType)) {
-    return c.json({ error: "dbType must be postgres or mysql." }, 400);
-  }
-
-  try {
-    await testDatabaseConnection(dbType, dbUri);
-  } catch (error) {
-    const message =
-      error instanceof Error ? error.message : "Could not connect to database.";
-    return c.json({ error: `Connection test failed: ${message}` }, 400);
-  }
-
-  try {
-    const activeAgent = await getActiveAgentForUser(user.id);
-    const preview = await fetchAndParseConnectionSchema(
-      dbType,
-      dbUri,
-      profileAgentConfig(activeAgent),
-    );
-    return c.json(preview);
-  } catch (error) {
-    return c.json({ error: errorMessage(error) }, 500);
-  }
+  return c.json(
+    {
+      error:
+        "Schema preview was removed. Use Build knowledge (POST /:id/index-knowledge) instead.",
+    },
+    410,
+  );
 });
 
 databaseRoutes.get("/:id/schema", async (c) => {
@@ -190,6 +141,7 @@ databaseRoutes.patch("/:id", async (c) => {
     name?: string;
     dbType?: string;
     dbUri?: string;
+    knowledgeDbUri?: string | null;
     businessContext?: string;
     dbMetadata?: unknown;
   }>();
@@ -204,6 +156,10 @@ databaseRoutes.patch("/:id", async (c) => {
   const name = body.name?.trim() ?? existing.name;
   const dbType = body.dbType?.trim() ?? existing.dbType;
   const dbUri = body.dbUri?.trim() ?? existing.dbUri;
+  const knowledgeDbUri =
+    body.knowledgeDbUri !== undefined
+      ? body.knowledgeDbUri?.trim() || null
+      : existing.knowledgeDbUri;
   const businessContext =
     body.businessContext !== undefined
       ? body.businessContext.trim() || null
@@ -231,6 +187,7 @@ databaseRoutes.patch("/:id", async (c) => {
       name,
       dbType,
       dbUri,
+      knowledgeDbUri,
       businessContext,
       ...(body.dbMetadata !== undefined
         ? {
@@ -241,7 +198,7 @@ databaseRoutes.patch("/:id", async (c) => {
           }
         : uriChanged
           ? {
-              dbMetadata: null,
+              dbMetadata: Prisma.DbNull,
               schemaSyncedAt: null,
               schemaSyncStatus: "idle",
               schemaSyncError: null,
@@ -253,7 +210,8 @@ databaseRoutes.patch("/:id", async (c) => {
   return c.json({ database: toPublicDatabase(connection) });
 });
 
-databaseRoutes.post("/:id/sync-schema", async (c) => {
+/** Stream knowledge indexing progress (SSE). */
+databaseRoutes.post("/:id/index-knowledge", async (c) => {
   const user = c.get("user");
   const id = c.req.param("id");
 
@@ -265,20 +223,127 @@ databaseRoutes.post("/:id/sync-schema", async (c) => {
   }
 
   try {
-    await syncConnectionSchema(id, user.id);
+    resolveKnowledgeDbUri(existing);
   } catch (error) {
-    const updated = await prisma.databaseConnection.findUnique({ where: { id } });
-    return c.json(
-      {
-        error: errorMessage(error),
-        database: toPublicDatabase(updated ?? existing),
-      },
-      500,
-    );
+    return c.json({ error: errorMessage(error) }, 400);
   }
 
-  const connection = await prisma.databaseConnection.findUnique({ where: { id } });
-  return c.json({ database: toPublicDatabase(connection ?? existing) });
+  c.header("Cache-Control", "no-cache, no-transform");
+  c.header("Connection", "keep-alive");
+  c.header("X-Accel-Buffering", "no");
+
+  return streamSSE(c, async (stream) => {
+    const signal = c.req.raw.signal;
+    try {
+      await stream.writeSSE({
+        event: "status",
+        data: JSON.stringify({ message: "indexing" }),
+      });
+
+      await indexConnectionKnowledge(id, user.id, {
+        abortSignal: signal,
+        onEvent: async (event) => {
+          await stream.writeSSE({
+            event: event.type,
+            data: JSON.stringify(event),
+          });
+        },
+      });
+
+      if (signal.aborted) return;
+
+      const connection = await prisma.databaseConnection.findUnique({
+        where: { id },
+      });
+      await stream.writeSSE({
+        event: "done",
+        data: JSON.stringify({
+          database: toPublicDatabase(connection ?? existing),
+        }),
+      });
+    } catch (error) {
+      if (signal.aborted || isAbortError(error)) return;
+      const updated = await prisma.databaseConnection.findUnique({
+        where: { id },
+      });
+      await stream.writeSSE({
+        event: "error",
+        data: JSON.stringify({
+          message: errorMessage(error),
+          database: toPublicDatabase(updated ?? existing),
+        }),
+      });
+    }
+  });
+});
+
+/** Backward-compatible alias — redirects to the same indexing flow. */
+databaseRoutes.post("/:id/sync-schema", async (c) => {
+  // Re-enter through index-knowledge by calling the same logic via sub-request is awkward;
+  // duplicate the thin auth check and forward to shared indexing helper above by path rewrite.
+  const user = c.get("user");
+  const id = c.req.param("id");
+
+  const existing = await prisma.databaseConnection.findFirst({
+    where: { id, userId: user.id },
+  });
+  if (!existing) {
+    return c.json({ error: "Database connection not found." }, 404);
+  }
+
+  try {
+    resolveKnowledgeDbUri(existing);
+  } catch (error) {
+    return c.json({ error: errorMessage(error) }, 400);
+  }
+
+  c.header("Cache-Control", "no-cache, no-transform");
+  c.header("Connection", "keep-alive");
+  c.header("X-Accel-Buffering", "no");
+
+  return streamSSE(c, async (stream) => {
+    const signal = c.req.raw.signal;
+    try {
+      await stream.writeSSE({
+        event: "status",
+        data: JSON.stringify({ message: "indexing" }),
+      });
+
+      await indexConnectionKnowledge(id, user.id, {
+        abortSignal: signal,
+        onEvent: async (event) => {
+          await stream.writeSSE({
+            event: event.type,
+            data: JSON.stringify(event),
+          });
+        },
+      });
+
+      if (signal.aborted) return;
+
+      const connection = await prisma.databaseConnection.findUnique({
+        where: { id },
+      });
+      await stream.writeSSE({
+        event: "done",
+        data: JSON.stringify({
+          database: toPublicDatabase(connection ?? existing),
+        }),
+      });
+    } catch (error) {
+      if (signal.aborted || isAbortError(error)) return;
+      const updated = await prisma.databaseConnection.findUnique({
+        where: { id },
+      });
+      await stream.writeSSE({
+        event: "error",
+        data: JSON.stringify({
+          message: errorMessage(error),
+          database: toPublicDatabase(updated ?? existing),
+        }),
+      });
+    }
+  });
 });
 
 databaseRoutes.post("/:id/activate", async (c) => {

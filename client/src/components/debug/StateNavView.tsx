@@ -17,10 +17,11 @@ export interface StateTimelineStep {
 const NODE_LABELS: Record<string, string> = {
   planner: "Planner",
   answer: "Answer",
-  schemaResolver: "Schema resolver",
-  graphBuilder: "Relationship graph",
+  knowledgeLoader: "Knowledge loader",
   entityExtractor: "Entity extractor",
+  semanticSearch: "Semantic search",
   pathFinder: "Path finder",
+  knowledgeExpansion: "Knowledge expansion",
   operationPlanner: "Operation planner",
   buildQuery: "Build query",
   validateQuery: "Validate query",

@@ -4,17 +4,14 @@ import {
   activateDatabase,
   createDatabase,
   deleteDatabase,
-  fetchDatabaseSchema,
   listDatabases,
-  previewDatabaseSchema,
-  syncDatabaseSchema,
+  indexDatabaseKnowledge,
   testDatabaseConnection,
   updateDatabase,
   type SchemaSyncStatus,
   type UserDatabase,
 } from "../api";
 import { cn } from "../lib/cn";
-import { SchemaMetadataView } from "./SchemaMetadataView";
 import { Alert } from "./ui/Alert";
 import { Badge } from "./ui/Badge";
 import { Button } from "./ui/Button";
@@ -51,13 +48,13 @@ function schemaStatusBadge(status: SchemaSyncStatus): {
 } {
   switch (status) {
     case "ready":
-      return { variant: "success", label: "Schema ready" };
+      return { variant: "success", label: "Knowledge ready" };
     case "syncing":
-      return { variant: "info", label: "Syncing schema…" };
+      return { variant: "info", label: "Indexing knowledge…" };
     case "failed":
-      return { variant: "destructive", label: "Schema sync failed" };
+      return { variant: "destructive", label: "Index failed" };
     default:
-      return { variant: "outline", label: "Schema not synced" };
+      return { variant: "outline", label: "Not indexed" };
   }
 }
 
@@ -183,29 +180,15 @@ export function DatabaseSettings({ onConnectionChange }: Props) {
     "postgresql://user:password@localhost:5432/mydb",
   );
   const [businessContext, setBusinessContext] = useState("");
-  const [fetchSchema, setFetchSchema] = useState(true);
-  const [previewingSchema, setPreviewingSchema] = useState(false);
-  const [schemaPreview, setSchemaPreview] = useState<{
-    key: string;
-    metadata: unknown;
-    tableCount: number;
-  } | null>(null);
-
-  const [editPreviewingSchema, setEditPreviewingSchema] = useState(false);
-  const [editSchemaPreview, setEditSchemaPreview] = useState<{
-    key: string;
-    metadata: unknown;
-    tableCount: number;
-  } | null>(null);
-  const [editStoredMetadata, setEditStoredMetadata] = useState<unknown>(null);
-  const [editStoredLoading, setEditStoredLoading] = useState(false);
-  const [editDraftMetadata, setEditDraftMetadata] = useState<unknown>(null);
+  const [knowledgeDbUri, setKnowledgeDbUri] = useState("");
+  const [indexProgress, setIndexProgress] = useState<string | null>(null);
 
   const [editName, setEditName] = useState("");
   const [editDbType, setEditDbType] = useState<"postgres" | "mysql">("postgres");
   const [editDbUri, setEditDbUri] = useState("");
   const [editBusinessContext, setEditBusinessContext] = useState("");
-  const [editSourceDb, setEditSourceDb] = useState<UserDatabase | null>(null);
+  const [editKnowledgeDbUri, setEditKnowledgeDbUri] = useState("");
+
 
   function clearNoticeTimer(key: string) {
     const timer = noticeTimers.current[key];
@@ -274,22 +257,11 @@ export function DatabaseSettings({ onConnectionChange }: Props) {
     };
   }, []);
 
-  const addPreviewKey = `${dbType}::${dbUri.trim()}`;
-  const addPreviewCurrent = schemaPreview?.key === addPreviewKey;
-  const editPreviewKey = `${editDbType}::${editDbUri.trim()}`;
-  const editPreviewCurrent = editSchemaPreview?.key === editPreviewKey;
-  const editUriChanged =
-    editSourceDb !== null &&
-    (editDbUri !== editSourceDb.dbUri || editDbType !== editSourceDb.dbType);
-
   useEffect(() => {
-    setSchemaPreview(null);
     setAddTestFeedback(null);
   }, [dbType, dbUri]);
 
   useEffect(() => {
-    setEditSchemaPreview(null);
-    setEditDraftMetadata(null);
     if (editingId) {
       setEditTestFeedback((prev) => {
         const next = { ...prev };
@@ -312,57 +284,6 @@ export function DatabaseSettings({ onConnectionChange }: Props) {
       scheduleFeedbackClear("add-test", () => setAddTestFeedback(null));
     } finally {
       setTesting(false);
-    }
-  }
-
-  async function handlePreviewSchema() {
-    setPreviewingSchema(true);
-    setAddFormNotice(null);
-    try {
-      const preview = await previewDatabaseSchema(dbType, dbUri.trim());
-      setSchemaPreview({
-        key: addPreviewKey,
-        metadata: preview.dbMetadata,
-        tableCount: preview.schemaTableCount,
-      });
-      showAddFormNotice(
-        "success",
-        `Schema preview ready (${preview.schemaTableCount} tables). Review below before saving.`,
-      );
-    } catch (err) {
-      showAddFormNotice(
-        "error",
-        err instanceof Error ? err.message : "Schema preview failed.",
-      );
-    } finally {
-      setPreviewingSchema(false);
-    }
-  }
-
-  async function handleEditPreviewSchema(dbId: string) {
-    setEditPreviewingSchema(true);
-    dismissConnectionNotice(dbId);
-    try {
-      const preview = await previewDatabaseSchema(editDbType, editDbUri.trim());
-      setEditSchemaPreview({
-        key: editPreviewKey,
-        metadata: preview.dbMetadata,
-        tableCount: preview.schemaTableCount,
-      });
-      setEditDraftMetadata(preview.dbMetadata);
-      showConnectionNotice(
-        dbId,
-        "success",
-        `Schema preview ready (${preview.schemaTableCount} tables). Save to store it on this connection.`,
-      );
-    } catch (err) {
-      showConnectionNotice(
-        dbId,
-        "error",
-        err instanceof Error ? err.message : "Schema preview failed.",
-      );
-    } finally {
-      setEditPreviewingSchema(false);
     }
   }
 
@@ -413,26 +334,19 @@ export function DatabaseSettings({ onConnectionChange }: Props) {
         name,
         dbType,
         dbUri,
+        knowledgeDbUri: knowledgeDbUri.trim() || undefined,
         businessContext: businessContext.trim() || undefined,
         setActive: true,
-        fetchSchema,
-        dbMetadata:
-          fetchSchema && addPreviewCurrent ? schemaPreview.metadata : undefined,
       });
-      if (result.warning) {
-        setAddSaveFeedback({ status: "warning", message: result.warning });
-      } else {
-        setAddSaveFeedback({
-          status: "success",
-          message: fetchSchema
-            ? "Saved & schema annotated"
-            : "Saved & activated",
-        });
-      }
-      scheduleFeedbackClear("add-save", () => setAddSaveFeedback(null), 6000);
+      setAddSaveFeedback({
+        status: "success",
+        message: "Saved & activated",
+      });
+      scheduleFeedbackClear("add-save", () => setAddSaveFeedback(null), 4000);
       await refresh();
       onConnectionChange?.();
-      setSchemaPreview(null);
+      // Build knowledge separately over SSE so save stays instant.
+      void handleBuildKnowledge(result.database.id);
     } catch (err) {
       const message = err instanceof Error ? err.message : "Failed to save";
       setAddSaveFeedback({ status: "error", message });
@@ -458,65 +372,51 @@ export function DatabaseSettings({ onConnectionChange }: Props) {
     }
   }
 
-  async function handleResync(id: string) {
+  async function handleBuildKnowledge(id: string) {
     setSyncingId(id);
+    setIndexProgress(null);
     dismissConnectionNotice(id);
     try {
-      await syncDatabaseSchema(id);
-      showConnectionNotice(id, "success", "Schema synced and annotated.");
+      await indexDatabaseKnowledge(id, {
+        onEvent: (event) => {
+          if (event.type === "knowledge_progress") {
+            setIndexProgress(
+              `Building ${event.table} (${event.completed}/${event.total})`,
+            );
+          } else if (event.type === "knowledge_completed") {
+            setIndexProgress("Finishing…");
+          }
+        },
+      });
+      showConnectionNotice(id, "success", "Knowledge base built and saved to vector DB.");
+      setIndexProgress(null);
       await refresh();
       onConnectionChange?.();
     } catch (err) {
       showConnectionNotice(
         id,
         "error",
-        err instanceof Error ? err.message : "Schema sync failed.",
+        err instanceof Error ? err.message : "Knowledge build failed.",
       );
+      setIndexProgress(null);
       await refresh();
     } finally {
       setSyncingId(null);
     }
   }
 
-  async function loadEditStoredSchema(db: UserDatabase) {
-    if (db.schemaSyncStatus !== "ready") {
-      setEditStoredMetadata(null);
-      setEditDraftMetadata(null);
-      return;
-    }
-    setEditStoredLoading(true);
-    try {
-      const data = await fetchDatabaseSchema(db.id);
-      setEditStoredMetadata(data.dbMetadata);
-      setEditDraftMetadata(data.dbMetadata);
-    } catch {
-      setEditStoredMetadata(null);
-      setEditDraftMetadata(null);
-    } finally {
-      setEditStoredLoading(false);
-    }
-  }
-
   function startEdit(db: UserDatabase) {
     setEditingId(db.id);
-    setEditSourceDb(db);
     setEditName(db.name);
     setEditDbType(db.dbType);
     setEditDbUri(db.dbUri);
     setEditBusinessContext(db.businessContext ?? "");
-    setEditSchemaPreview(null);
-    setEditStoredMetadata(null);
-    setEditDraftMetadata(null);
+    setEditKnowledgeDbUri(db.knowledgeDbUri ?? "");
     setExpandedId(db.id);
-    void loadEditStoredSchema(db);
   }
 
   function cancelEdit(dbId: string) {
     setEditingId(null);
-    setEditSourceDb(null);
-    setEditSchemaPreview(null);
-    setEditStoredMetadata(null);
-    setEditDraftMetadata(null);
     setEditTestFeedback((prev) => {
       const next = { ...prev };
       delete next[dbId];
@@ -543,16 +443,15 @@ export function DatabaseSettings({ onConnectionChange }: Props) {
         name: editName,
         dbType: editDbType,
         dbUri: editDbUri,
+        knowledgeDbUri: editKnowledgeDbUri.trim() || null,
         businessContext: editBusinessContext,
-        ...(editDraftMetadata !== null ? { dbMetadata: editDraftMetadata } : {}),
       });
-      const feedback: ButtonFeedback =
-        uriChanged && editDraftMetadata === null
-          ? {
-              status: "warning",
-              message: "Saved — resync schema for new URI",
-            }
-          : { status: "success", message: "Changes saved" };
+      const feedback: ButtonFeedback = uriChanged
+        ? {
+            status: "warning",
+            message: "Saved — rebuild knowledge for the new URI",
+          }
+        : { status: "success", message: "Changes saved" };
 
       setEditSaveFeedback((prev) => ({ ...prev, [db.id]: feedback }));
       scheduleFeedbackClear(`edit-save-${db.id}`, () => {
@@ -562,10 +461,6 @@ export function DatabaseSettings({ onConnectionChange }: Props) {
           return next;
         });
         setEditingId(null);
-        setEditSourceDb(null);
-        setEditSchemaPreview(null);
-        setEditStoredMetadata(null);
-        setEditDraftMetadata(null);
       }, 1500);
 
       await refresh();
@@ -618,7 +513,6 @@ export function DatabaseSettings({ onConnectionChange }: Props) {
       if (expandedId === deletedId) setExpandedId(null);
       if (editingId === deletedId) {
         setEditingId(null);
-        setEditSourceDb(null);
       }
       await refresh();
       onConnectionChange?.();
@@ -641,8 +535,9 @@ export function DatabaseSettings({ onConnectionChange }: Props) {
       <div>
         <h2 className="text-lg font-semibold tracking-tight">Database connections</h2>
         <p className="mt-1 text-sm text-muted-foreground">
-          Configure PostgreSQL or MySQL targets. Schema metadata and business
-          context are stored per connection and sent with every agent request.
+          Configure PostgreSQL or MySQL targets. Build knowledge into the vector DB
+          (embeddings + documents). Business context is optional and sent with every
+          agent request.
         </p>
       </div>
 
@@ -777,7 +672,7 @@ export function DatabaseSettings({ onConnectionChange }: Props) {
                               <span className="mt-1 block text-xs text-muted-foreground">
                                 {db.schemaTableCount} tables
                                 {db.schemaSyncedAt &&
-                                  ` · synced ${new Date(db.schemaSyncedAt).toLocaleString()}`}
+                                  ` · built ${new Date(db.schemaSyncedAt).toLocaleString()}`}
                               </span>
                             )}
                           </span>
@@ -799,10 +694,12 @@ export function DatabaseSettings({ onConnectionChange }: Props) {
                             size="sm"
                             loading={syncingId === db.id}
                             disabled={syncingId === db.id}
-                            onClick={() => void handleResync(db.id)}
+                            onClick={() => void handleBuildKnowledge(db.id)}
                           >
                             <RefreshCw className="h-3.5 w-3.5" />
-                            Resync schema
+                            {syncingId === db.id && indexProgress
+                              ? indexProgress
+                              : "Build knowledge"}
                           </Button>
                           <Button
                             type="button"
@@ -833,10 +730,15 @@ export function DatabaseSettings({ onConnectionChange }: Props) {
                         )}
 
                         {db.schemaSyncStatus === "ready" && !editing && (
-                          <SavedConnectionSchema
-                            dbId={db.id}
-                            schemaSyncedAt={db.schemaSyncedAt}
-                          />
+                          <p className="text-xs text-muted-foreground">
+                            Knowledge ready
+                            {db.schemaTableCount > 0
+                              ? ` · ${db.schemaTableCount} tables`
+                              : ""}
+                            {db.schemaSyncedAt
+                              ? ` · built ${new Date(db.schemaSyncedAt).toLocaleString()}`
+                              : ""}
+                          </p>
                         )}
 
                         {editing ? (
@@ -872,6 +774,22 @@ export function DatabaseSettings({ onConnectionChange }: Props) {
                               />
                             </FormField>
                             <FormField>
+                              <Label htmlFor={`edit-knowledge-uri-${db.id}`}>
+                                Knowledge DB URI (optional)
+                              </Label>
+                              <Textarea
+                                id={`edit-knowledge-uri-${db.id}`}
+                                value={editKnowledgeDbUri}
+                                onChange={(e) => setEditKnowledgeDbUri(e.target.value)}
+                                rows={2}
+                                placeholder={
+                                  db.hasEnvKnowledgeDbUri
+                                    ? "Leave blank to use KNOWLEDGE_DB_URI from env"
+                                    : "postgresql://…/knowledge"
+                                }
+                              />
+                            </FormField>
+                            <FormField>
                               <Label htmlFor={`edit-context-${db.id}`}>
                                 Business context
                               </Label>
@@ -884,65 +802,24 @@ export function DatabaseSettings({ onConnectionChange }: Props) {
                               />
                             </FormField>
 
-                            <div className="space-y-3 rounded-md border border-border bg-muted/10 p-3">
-                              <div className="flex flex-wrap items-center justify-between gap-2">
-                                <div>
-                                  <p className="text-sm font-medium text-foreground">
-                                    Schema preview
-                                  </p>
-                                  <p className="text-xs text-muted-foreground">
-                                    {editPreviewCurrent
-                                      ? "Showing freshly fetched preview."
-                                      : editUriChanged
-                                        ? "URI changed — fetch a new preview before saving."
-                                        : "Showing stored schema. Fetch to preview changes."}
-                                  </p>
-                                </div>
-                                <div className="flex flex-wrap gap-2">
-                                  <FeedbackButton
-                                    type="button"
-                                    variant="secondary"
-                                    size="sm"
-                                    idleLabel="Test connection"
-                                    loading={testingEditId === db.id}
-                                    feedback={editTestFeedback[db.id] ?? null}
-                                    onClick={() => void handleEditTest(db.id)}
-                                  />
-                                  <Button
-                                    type="button"
-                                    variant="secondary"
-                                    size="sm"
-                                    loading={editPreviewingSchema}
-                                    onClick={() => void handleEditPreviewSchema(db.id)}
-                                  >
-                                    Fetch & preview schema
-                                  </Button>
-                                </div>
-                              </div>
-                              {editStoredLoading && editDraftMetadata === null ? (
-                                <Skeleton className="h-32 w-full" />
-                              ) : editDraftMetadata ? (
-                                <SchemaMetadataView
-                                  metadata={editDraftMetadata}
-                                  editable
-                                  onMetadataChange={setEditDraftMetadata}
-                                />
-                              ) : (
-                                <p className="text-xs text-muted-foreground">
-                                  {editUriChanged
-                                    ? "Connection details changed. Fetch the annotated schema before saving."
-                                    : "No stored schema yet. Fetch and preview to annotate tables."}
-                                </p>
-                              )}
+                            <div className="flex flex-wrap gap-2">
+                              <FeedbackButton
+                                type="button"
+                                variant="secondary"
+                                size="sm"
+                                idleLabel="Test connection"
+                                loading={testingEditId === db.id}
+                                feedback={editTestFeedback[db.id] ?? null}
+                                onClick={() => void handleEditTest(db.id)}
+                              />
+                              <FeedbackButton
+                                type="button"
+                                idleLabel="Save changes"
+                                loading={savingEditId === db.id}
+                                feedback={editSaveFeedback[db.id] ?? null}
+                                onClick={() => void handleSaveEdit(db)}
+                              />
                             </div>
-
-                            <FeedbackButton
-                              type="button"
-                              idleLabel="Save changes"
-                              loading={savingEditId === db.id}
-                              feedback={editSaveFeedback[db.id] ?? null}
-                              onClick={() => void handleSaveEdit(db)}
-                            />
                           </div>
                         ) : (
                           <ConnectionBusinessContext
@@ -965,8 +842,8 @@ export function DatabaseSettings({ onConnectionChange }: Props) {
         <CardHeader>
           <CardTitle>Add connection</CardTitle>
           <CardDescription>
-            Test your URI before saving. Optionally fetch and annotate schema with
-            the agent LLM.
+            Save a SQL connection instantly. Then build knowledge into the vector DB —
+            progress streams table by table.
           </CardDescription>
         </CardHeader>
         <CardContent className="p-0">
@@ -1017,6 +894,20 @@ export function DatabaseSettings({ onConnectionChange }: Props) {
             </FormField>
 
             <FormField>
+              <Label htmlFor="db-knowledge-uri">Knowledge DB URI (optional)</Label>
+              <Textarea
+                id="db-knowledge-uri"
+                value={knowledgeDbUri}
+                onChange={(e) => setKnowledgeDbUri(e.target.value)}
+                rows={2}
+                placeholder="Leave blank to use KNOWLEDGE_DB_URI from server env"
+              />
+              <p className="text-xs text-muted-foreground">
+                PostgreSQL with pgvector. Overrides the shared env URI when set.
+              </p>
+            </FormField>
+
+            <FormField>
               <Label htmlFor="db-business-context">Business context</Label>
               <Textarea
                 id="db-business-context"
@@ -1026,60 +917,9 @@ export function DatabaseSettings({ onConnectionChange }: Props) {
                 placeholder="Domain glossary, metric definitions, naming conventions…"
               />
               <p className="text-xs text-muted-foreground">
-                Appended to the agent system prompt for queries against this database.
+                Mapped to businessSummary and appended to agent prompts for this database.
               </p>
             </FormField>
-
-            <label className="flex items-start gap-2 text-sm">
-              <input
-                type="checkbox"
-                className="mt-1"
-                checked={fetchSchema}
-                onChange={(e) => setFetchSchema(e.target.checked)}
-              />
-              <span>
-                <span className="font-medium text-foreground">
-                  Fetch and annotate schema on save
-                </span>
-                <span className="mt-0.5 block text-xs text-muted-foreground">
-                  Connects to the database, fetches tables, and runs parseSchema to
-                  add description annotations. Preview below before saving.
-                </span>
-              </span>
-            </label>
-
-            {fetchSchema && (
-              <div className="space-y-3 rounded-md border border-border bg-muted/10 p-3">
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <p className="text-sm font-medium text-foreground">Schema preview</p>
-                  <Button
-                    type="button"
-                    variant="secondary"
-                    size="sm"
-                    loading={previewingSchema}
-                    onClick={() => void handlePreviewSchema()}
-                  >
-                    Fetch & preview schema
-                  </Button>
-                </div>
-                {addPreviewCurrent ? (
-                  <SchemaMetadataView
-                    metadata={schemaPreview.metadata}
-                    editable
-                    onMetadataChange={(next) =>
-                      setSchemaPreview((prev) =>
-                        prev ? { ...prev, metadata: next } : null,
-                      )
-                    }
-                  />
-                ) : (
-                  <p className="text-xs text-muted-foreground">
-                    Fetch the annotated schema to review tables and column descriptions
-                    before saving this connection.
-                  </p>
-                )}
-              </div>
-            )}
 
             <div className="flex flex-wrap gap-2">
               <FeedbackButton
@@ -1098,6 +938,10 @@ export function DatabaseSettings({ onConnectionChange }: Props) {
                 feedback={addSaveFeedback}
               />
             </div>
+            <p className="text-xs text-muted-foreground">
+              After save, knowledge build starts automatically and shows live progress
+              on the connection card. You can also click <span className="font-medium">Build knowledge</span> anytime.
+            </p>
           </form>
         </CardContent>
       </Card>
@@ -1117,60 +961,6 @@ export function DatabaseSettings({ onConnectionChange }: Props) {
         loading={deleting}
         onConfirm={confirmDelete}
       />
-    </div>
-  );
-}
-
-function SavedConnectionSchema({
-  dbId,
-  schemaSyncedAt,
-}: {
-  dbId: string;
-  schemaSyncedAt: string | null;
-}) {
-  const [loading, setLoading] = useState(true);
-  const [metadata, setMetadata] = useState<unknown>(null);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    let cancelled = false;
-    setLoading(true);
-    setError(null);
-    void fetchDatabaseSchema(dbId)
-      .then((data) => {
-        if (!cancelled) setMetadata(data.dbMetadata);
-      })
-      .catch((err) => {
-        if (!cancelled) {
-          setError(err instanceof Error ? err.message : "Failed to load schema.");
-        }
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [dbId, schemaSyncedAt]);
-
-  if (loading) {
-    return <Skeleton className="h-32 w-full" />;
-  }
-  if (error) {
-    return <Alert variant="error">{error}</Alert>;
-  }
-  if (!metadata) {
-    return (
-      <p className="text-sm text-muted-foreground">
-        No annotated schema stored for this connection.
-      </p>
-    );
-  }
-
-  return (
-    <div className="space-y-2">
-      <p className="text-sm font-medium text-foreground">Annotated schema</p>
-      <SchemaMetadataView metadata={metadata} />
     </div>
   );
 }

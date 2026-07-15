@@ -9,7 +9,8 @@ import {
   type LlmProvider,
   type UserAgent,
 } from "../api";
-import { providerLabel } from "../lib/llmProviders";
+import { providerLabel, embeddingProviderLabel } from "../lib/llmProviders";
+import type { EmbeddingProvider } from "../lib/llmProviders";
 import { AgentLlmFields } from "./AgentLlmFields";
 import { cn } from "../lib/cn";
 import { Alert } from "./ui/Alert";
@@ -34,6 +35,12 @@ interface Props {
   onAgentChange?: () => void;
 }
 
+const EMBEDDING_LABELS = {
+  provider: "Embedding provider",
+  model: "Embedding model",
+  apiKey: "Embedding API key",
+};
+
 export function AgentProfileSettings({ onAgentChange }: Props) {
   const [agents, setAgents] = useState<UserAgent[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
@@ -55,6 +62,12 @@ export function AgentProfileSettings({ onAgentChange }: Props) {
   const [modelName, setModelName] = useState("");
   const [apiKey, setApiKey] = useState("");
   const [baseUrl, setBaseUrl] = useState("");
+  const [embeddingProvider, setEmbeddingProvider] = useState<
+    EmbeddingProvider | ""
+  >("");
+  const [embeddingModelName, setEmbeddingModelName] = useState("");
+  const [embeddingApiKey, setEmbeddingApiKey] = useState("");
+  const [embeddingBaseUrl, setEmbeddingBaseUrl] = useState("");
 
   const [editName, setEditName] = useState("");
   const [editSystemPrompt, setEditSystemPrompt] = useState("");
@@ -62,6 +75,12 @@ export function AgentProfileSettings({ onAgentChange }: Props) {
   const [editModelName, setEditModelName] = useState("");
   const [editApiKey, setEditApiKey] = useState("");
   const [editBaseUrl, setEditBaseUrl] = useState("");
+  const [editEmbeddingProvider, setEditEmbeddingProvider] = useState<
+    EmbeddingProvider | ""
+  >("");
+  const [editEmbeddingModelName, setEditEmbeddingModelName] = useState("");
+  const [editEmbeddingApiKey, setEditEmbeddingApiKey] = useState("");
+  const [editEmbeddingBaseUrl, setEditEmbeddingBaseUrl] = useState("");
 
   useEffect(() => {
     if (!success) return;
@@ -86,6 +105,19 @@ export function AgentProfileSettings({ onAgentChange }: Props) {
     void refresh();
   }, []);
 
+  function resetCreateForm() {
+    setName("Default agent");
+    setSystemPrompt("");
+    setProvider("openai");
+    setModelName("");
+    setApiKey("");
+    setBaseUrl("");
+    setEmbeddingProvider("");
+    setEmbeddingModelName("");
+    setEmbeddingApiKey("");
+    setEmbeddingBaseUrl("");
+  }
+
   async function handleSave(e: React.FormEvent) {
     e.preventDefault();
     setSaving(true);
@@ -99,15 +131,14 @@ export function AgentProfileSettings({ onAgentChange }: Props) {
         modelName: modelName.trim() || undefined,
         apiKey: apiKey.trim() || undefined,
         baseUrl: baseUrl.trim() || undefined,
+        embeddingProvider: embeddingProvider || null,
+        embeddingModelName: embeddingModelName.trim() || undefined,
+        embeddingApiKey: embeddingApiKey.trim() || undefined,
+        embeddingBaseUrl: embeddingBaseUrl.trim() || undefined,
         setActive: true,
       });
       setSuccess("Agent saved and set as active.");
-      setName("Default agent");
-      setSystemPrompt("");
-      setProvider("openai");
-      setModelName("");
-      setApiKey("");
-      setBaseUrl("");
+      resetCreateForm();
       await refresh();
       onAgentChange?.();
     } catch (err) {
@@ -138,6 +169,12 @@ export function AgentProfileSettings({ onAgentChange }: Props) {
     setEditModelName(agent.modelName ?? "");
     setEditBaseUrl(agent.baseUrl ?? "");
     setEditApiKey("");
+    setEditEmbeddingProvider(
+      (agent.embeddingProvider as EmbeddingProvider) ?? "",
+    );
+    setEditEmbeddingModelName(agent.embeddingModelName ?? "");
+    setEditEmbeddingBaseUrl(agent.embeddingBaseUrl ?? "");
+    setEditEmbeddingApiKey("");
     setExpandedId(agent.id);
   }
 
@@ -154,6 +191,10 @@ export function AgentProfileSettings({ onAgentChange }: Props) {
         baseUrl: editBaseUrl.trim() || null,
         // Empty leaves the stored key untouched on the server.
         apiKey: editApiKey.trim() || undefined,
+        embeddingProvider: editEmbeddingProvider || null,
+        embeddingModelName: editEmbeddingModelName.trim() || null,
+        embeddingBaseUrl: editEmbeddingBaseUrl.trim() || null,
+        embeddingApiKey: editEmbeddingApiKey.trim() || undefined,
       });
       setEditingId(null);
       setSuccess("Agent updated.");
@@ -192,8 +233,9 @@ export function AgentProfileSettings({ onAgentChange }: Props) {
       <div>
         <h2 className="text-lg font-semibold tracking-tight">Agent profiles</h2>
         <p className="mt-1 text-sm text-muted-foreground">
-          Store the LLM provider, model, credentials, and system prompt per agent
-          profile. The active profile drives chat and workflow tests.
+          Store the LLM provider, embedding model, credentials, and system prompt
+          per agent profile. The active profile drives chat, knowledge indexing,
+          and workflow tests.
         </p>
       </div>
 
@@ -208,6 +250,14 @@ export function AgentProfileSettings({ onAgentChange }: Props) {
               <p className="mt-1 text-sm text-muted-foreground">
                 {providerLabel(active.llmProvider)}
                 {active.modelName ? ` · ${active.modelName}` : " · default model"}
+                {" · "}
+                {active.embeddingProvider
+                  ? `embed ${embeddingProviderLabel(active.embeddingProvider)}${
+                      active.embeddingModelName
+                        ? ` · ${active.embeddingModelName}`
+                        : ""
+                    }`
+                  : "default embeddings"}
                 {" · "}
                 {active.hasSystemPrompt
                   ? "custom system prompt"
@@ -241,7 +291,9 @@ export function AgentProfileSettings({ onAgentChange }: Props) {
       <Card>
         <CardHeader>
           <CardTitle>Saved agents</CardTitle>
-          <CardDescription>Manage agent profiles, LLM config, and system prompts</CardDescription>
+          <CardDescription>
+            Manage agent profiles, LLM and embedding config, and system prompts
+          </CardDescription>
         </CardHeader>
         <CardContent>
           {loading ? (
@@ -312,6 +364,16 @@ export function AgentProfileSettings({ onAgentChange }: Props) {
                                 {providerLabel(agent.llmProvider)}
                                 {agent.modelName ? ` · ${agent.modelName}` : ""}
                               </Badge>
+                              <Badge variant="outline" className="normal-case">
+                                {agent.embeddingProvider
+                                  ? `${embeddingProviderLabel(agent.embeddingProvider)}${
+                                      agent.embeddingModelName
+                                        ? ` · ${agent.embeddingModelName}`
+                                        : ""
+                                    }`
+                                  : "Default embeddings"}
+                                {agent.hasEmbeddingApiKey ? " · key" : ""}
+                              </Badge>
                             </span>
                             <span className="mt-1 block font-medium text-foreground">
                               {agent.name}
@@ -364,21 +426,53 @@ export function AgentProfileSettings({ onAgentChange }: Props) {
                                 onChange={(e) => setEditName(e.target.value)}
                               />
                             </FormField>
-                            <div className="grid gap-4 sm:grid-cols-2">
-                              <FormField className="sm:col-span-2">
-                                <AgentLlmFields
-                                  idPrefix={`edit-agent-${agent.id}`}
-                                  provider={editProvider}
-                                  onProviderChange={setEditProvider}
-                                  modelName={editModelName}
-                                  onModelNameChange={setEditModelName}
-                                  apiKey={editApiKey}
-                                  onApiKeyChange={setEditApiKey}
-                                  baseUrl={editBaseUrl}
-                                  onBaseUrlChange={setEditBaseUrl}
-                                  hasStoredApiKey={agent.hasApiKey}
-                                />
-                              </FormField>
+                            <FormField>
+                              <AgentLlmFields
+                                idPrefix={`edit-agent-${agent.id}`}
+                                provider={editProvider}
+                                onProviderChange={(v) =>
+                                  setEditProvider((v || "openai") as LlmProvider)
+                                }
+                                modelName={editModelName}
+                                onModelNameChange={setEditModelName}
+                                apiKey={editApiKey}
+                                onApiKeyChange={setEditApiKey}
+                                baseUrl={editBaseUrl}
+                                onBaseUrlChange={setEditBaseUrl}
+                                hasStoredApiKey={agent.hasApiKey}
+                              />
+                            </FormField>
+                            <div className="space-y-3 rounded-md border border-border p-3">
+                              <div>
+                                <p className="text-sm font-medium text-foreground">
+                                  Embeddings
+                                </p>
+                                <p className="mt-1 text-xs text-muted-foreground">
+                                  Passed to DatabaseAgent as embeddingProvider /
+                                  embeddingModelName / embeddingApiKey /
+                                  embeddingBaseUrl (openai, local, ollama,
+                                  gemini).
+                                </p>
+                              </div>
+                              <AgentLlmFields
+                                idPrefix={`edit-agent-embed-${agent.id}`}
+                                provider={editEmbeddingProvider}
+                                onProviderChange={(v) =>
+                                  setEditEmbeddingProvider(
+                                    (v as EmbeddingProvider | "") || "",
+                                  )
+                                }
+                                modelName={editEmbeddingModelName}
+                                onModelNameChange={setEditEmbeddingModelName}
+                                apiKey={editEmbeddingApiKey}
+                                onApiKeyChange={setEditEmbeddingApiKey}
+                                baseUrl={editEmbeddingBaseUrl}
+                                onBaseUrlChange={setEditEmbeddingBaseUrl}
+                                hasStoredApiKey={agent.hasEmbeddingApiKey}
+                                labels={EMBEDDING_LABELS}
+                                allowEmptyProvider
+                                embeddingMode
+                              />
                             </div>
                             <FormField>
                               <Label htmlFor={`edit-agent-prompt-${agent.id}`}>
@@ -435,6 +529,41 @@ export function AgentProfileSettings({ onAgentChange }: Props) {
                                   {agent.hasApiKey ? "Stored" : "Server default"}
                                 </dd>
                               </div>
+                              <div>
+                                <dt className="text-xs font-medium text-muted-foreground">
+                                  Embedding provider
+                                </dt>
+                                <dd className="text-sm text-foreground">
+                                  {embeddingProviderLabel(agent.embeddingProvider)}
+                                </dd>
+                              </div>
+                              <div>
+                                <dt className="text-xs font-medium text-muted-foreground">
+                                  Embedding model
+                                </dt>
+                                <dd className="text-sm text-foreground">
+                                  {agent.embeddingModelName ||
+                                    "text-embedding-3-small"}
+                                </dd>
+                              </div>
+                              <div>
+                                <dt className="text-xs font-medium text-muted-foreground">
+                                  Embedding base URL
+                                </dt>
+                                <dd className="text-sm break-all text-foreground">
+                                  {agent.embeddingBaseUrl || "Chat / server default"}
+                                </dd>
+                              </div>
+                              <div>
+                                <dt className="text-xs font-medium text-muted-foreground">
+                                  Embedding API key
+                                </dt>
+                                <dd className="text-sm text-foreground">
+                                  {agent.hasEmbeddingApiKey
+                                    ? "Stored"
+                                    : "Chat / server default"}
+                                </dd>
+                              </div>
                             </dl>
                             <div className="space-y-2">
                               <Label>System prompt</Label>
@@ -464,8 +593,8 @@ export function AgentProfileSettings({ onAgentChange }: Props) {
         <CardHeader>
           <CardTitle>Add agent</CardTitle>
           <CardDescription>
-            Configure the LLM provider, model, credentials, and a base system
-            prompt for the SQL agent.
+            Configure the LLM provider, embedding model, credentials, and a base
+            system prompt for the SQL agent.
           </CardDescription>
         </CardHeader>
         <CardContent>
@@ -483,7 +612,9 @@ export function AgentProfileSettings({ onAgentChange }: Props) {
             <AgentLlmFields
               idPrefix="agent"
               provider={provider}
-              onProviderChange={setProvider}
+              onProviderChange={(v) =>
+                setProvider((v || "openai") as LlmProvider)
+              }
               modelName={modelName}
               onModelNameChange={setModelName}
               apiKey={apiKey}
@@ -491,6 +622,37 @@ export function AgentProfileSettings({ onAgentChange }: Props) {
               baseUrl={baseUrl}
               onBaseUrlChange={setBaseUrl}
             />
+
+            <div className="space-y-3 rounded-md border border-border p-3">
+              <div>
+                <p className="text-sm font-medium text-foreground">Embeddings</p>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  Same fields as DatabaseAgent config:{" "}
+                  <code className="text-[0.7rem]">embeddingProvider</code>,{" "}
+                  <code className="text-[0.7rem]">embeddingModelName</code>,{" "}
+                  <code className="text-[0.7rem]">embeddingApiKey</code>,{" "}
+                  <code className="text-[0.7rem]">embeddingBaseUrl</code>. Leave
+                  empty to use server defaults (
+                  <code className="text-[0.7rem]">openai</code> + chat key).
+                </p>
+              </div>
+              <AgentLlmFields
+                idPrefix="agent-embed"
+                provider={embeddingProvider}
+                onProviderChange={(v) =>
+                  setEmbeddingProvider((v as EmbeddingProvider | "") || "")
+                }
+                modelName={embeddingModelName}
+                onModelNameChange={setEmbeddingModelName}
+                apiKey={embeddingApiKey}
+                onApiKeyChange={setEmbeddingApiKey}
+                baseUrl={embeddingBaseUrl}
+                onBaseUrlChange={setEmbeddingBaseUrl}
+                labels={EMBEDDING_LABELS}
+                allowEmptyProvider
+                embeddingMode
+              />
+            </div>
 
             <FormField>
               <Label htmlFor="agent-system-prompt">System prompt</Label>

@@ -103,5 +103,31 @@ export function parseOperationsFromDebug(debug: Record<string, unknown>): string
 }
 
 export function parseEntitiesFromDebug(debug: Record<string, unknown>): string[] | null {
-  return parseNodeFieldFromDebug(debug, "entityExtractor", "entities", isStringList);
+  return (
+    parseNodeFieldFromDebug(debug, "knowledgeExpansion", "entities", isStringList) ??
+    parseNodeFieldFromDebug(debug, "entityExtractor", "businessConcepts", isStringList) ??
+    parseNodeFieldFromDebug(debug, "entityExtractor", "entities", isStringList)
+  );
+}
+
+export function parseBusinessConceptsFromDebug(
+  debug: Record<string, unknown>,
+): string[] | null {
+  return parseNodeFieldFromDebug(
+    debug,
+    "entityExtractor",
+    "businessConcepts",
+    isStringList,
+  );
+}
+
+export function parseStartingDocumentIdsFromDebug(
+  debug: Record<string, unknown>,
+): string[] | null {
+  return parseNodeFieldFromDebug(
+    debug,
+    "semanticSearch",
+    "startingDocumentIds",
+    isStringList,
+  );
 }

@@ -122,10 +122,18 @@ export function referencedOnlyTables(graph: RelationshipGraph): string[] {
 export function parseRelationshipGraphFromDebug(
   debug: Record<string, unknown>,
 ): RelationshipGraph | null {
-  return parseNodeFieldFromDebug(
-    debug,
-    "graphBuilder",
-    "graph",
-    isRelationshipGraph,
+  return (
+    parseNodeFieldFromDebug(
+      debug,
+      "knowledgeLoader",
+      "graph",
+      isRelationshipGraph,
+    ) ??
+    parseNodeFieldFromDebug(
+      debug,
+      "graphBuilder",
+      "graph",
+      isRelationshipGraph,
+    )
   );
 }

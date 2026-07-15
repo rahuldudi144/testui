@@ -1,23 +1,25 @@
 /**
  * Testui-only agent runner that captures stateHistory from the graph final state.
- * Mirrors DatabaseAgent.runGraph / stream without modifying the agent module.
+ * Mirrors DatabaseAgent.runGraph / stream for v3 knowledge-driven invoke.
  */
 import type {
   DatabaseAgentConfig,
   DatabaseType,
   InvokeInput,
   InvokeResult,
+  StateHistoryEntry,
 } from "../../types/index.js";
 import type {
   AgentInput,
   AgentState,
-  StateHistoryEntry,
 } from "../../schemas/state.js";
 import type { AgentRuntime } from "../../types/runtime.js";
 import { RUNTIME_KEY } from "../../types/runtime.js";
 import type { DatabaseAdapter } from "../../database/adapter.js";
 import { createAdapter } from "../../database/createAdapter.js";
 import { withLoggingAdapter } from "../../database/withLoggingAdapter.js";
+import { createEmbeddingsFromConfig } from "../../knowledge/embeddings.js";
+import type { EmbeddingsClient } from "../../knowledge/embeddings.js";
 import { createChatModel } from "../../llm/createChatModel.js";
 import {
   createInvocationChatModel,
@@ -60,16 +62,17 @@ class AgentRunner {
   private readonly config: DatabaseAgentConfig;
   private readonly readOnly: boolean;
   private readonly maxRetries: number;
-  private readonly maxAnswerRetries: number;
   private readonly llm: ReturnType<typeof createChatModel>;
+  private readonly embeddings: EmbeddingsClient;
   private readonly dbUri: string;
 
   constructor(config: DatabaseAgentConfig, dbUri: string) {
     this.config = config;
     this.readOnly = config.readOnly ?? true;
     this.maxRetries = config.maxValidationRetries ?? 3;
-    this.maxAnswerRetries = config.maxAnswerRetries ?? 2;
     this.llm = createChatModel(config);
+    // Same as DatabaseAgent: embeddings once from constructor config.
+    this.embeddings = createEmbeddingsFromConfig(config);
     this.dbUri = dbUri;
   }
 
@@ -101,16 +104,12 @@ class AgentRunner {
     let caughtError: unknown;
     let finalState: AgentState | undefined;
     const adapter = await this.openAdapter(logger, observability);
+    const runtime = this.buildRuntime(input, adapter, logger, observability);
 
     try {
       const stream = await graph.stream(this.toInputState(input), {
         configurable: {
-          [RUNTIME_KEY]: this.buildRuntime(
-            input,
-            adapter,
-            logger,
-            observability,
-          ),
+          [RUNTIME_KEY]: runtime,
         },
         streamMode: ["messages", "values"],
         signal: input.abortSignal,
@@ -165,6 +164,7 @@ class AgentRunner {
         error,
       );
     } finally {
+      await closeVectorStore(runtime, logger);
       await closeAdapter(adapter, logger);
       completeTrace(observability, success, caughtError);
     }
@@ -199,16 +199,12 @@ class AgentRunner {
     let caughtError: unknown;
     let finalState: AgentState | undefined;
     const adapter = await this.openAdapter(logger, observability);
+    const runtime = this.buildRuntime(input, adapter, logger, observability);
 
     try {
       finalState = (await graph.invoke(this.toInputState(input), {
         configurable: {
-          [RUNTIME_KEY]: this.buildRuntime(
-            input,
-            adapter,
-            logger,
-            observability,
-          ),
+          [RUNTIME_KEY]: runtime,
         },
         signal: input.abortSignal,
       })) as AgentState;
@@ -233,6 +229,7 @@ class AgentRunner {
         error,
       );
     } finally {
+      await closeVectorStore(runtime, logger);
       await closeAdapter(adapter, logger);
       completeTrace(observability, success, caughtError);
     }
@@ -278,11 +275,14 @@ class AgentRunner {
       dbType: this.config.dbType,
       readOnly: this.readOnly,
       maxRetries: this.maxRetries,
-      maxAnswerRetries: this.maxAnswerRetries,
       logger,
       streamEvents: input.streamEvents ?? false,
       debug: input.debug ?? false,
       observability,
+      knowledgeDbUri: input.knowledgeDbUri,
+      userId: input.userId,
+      databaseId: input.databaseId,
+      embeddings: this.embeddings,
     };
   }
 
@@ -294,9 +294,11 @@ class AgentRunner {
         this.config.systemPrompt,
         input.systemPrompt,
       ),
-      businessContext: input.businessContext,
+      businessSummary: input.businessSummary,
       systemPromptMode: input.systemPromptMode ?? "append",
-      dbMetadata: input.dbMetadata,
+      knowledgeDbUri: input.knowledgeDbUri,
+      userId: input.userId,
+      databaseId: input.databaseId,
       dryRun: input.dryRun ?? false,
     };
   }
@@ -467,6 +469,15 @@ function validateInput(input: InvokeInput): void {
   if (!input || typeof input.query !== "string" || input.query.trim() === "") {
     throw new AgentError("INVALID_INPUT", "A non-empty query is required.");
   }
+  if (!input.knowledgeDbUri?.trim()) {
+    throw new AgentError("INVALID_INPUT", "knowledgeDbUri is required.");
+  }
+  if (!input.userId?.trim()) {
+    throw new AgentError("INVALID_INPUT", "userId is required.");
+  }
+  if (!input.databaseId?.trim()) {
+    throw new AgentError("INVALID_INPUT", "databaseId is required.");
+  }
 }
 
 async function closeAdapter(
@@ -477,5 +488,19 @@ async function closeAdapter(
     await adapter.close();
   } catch (error) {
     logger.warn(`DB: failed to close connection — ${errorMessage(error)}`);
+  }
+}
+
+async function closeVectorStore(
+  runtime: AgentRuntime,
+  logger: Logger,
+): Promise<void> {
+  if (!runtime.vectorStore) return;
+  try {
+    await runtime.vectorStore.close();
+  } catch (error) {
+    logger.warn(
+      `Knowledge DB: failed to close connection — ${errorMessage(error)}`,
+    );
   }
 }

@@ -1,5 +1,4 @@
-import type { Message } from "../../types/index.js";
-import type { StateHistoryEntry } from "../../schemas/state.js";
+import type { Message, StateHistoryEntry } from "../../types/index.js";
 
 export interface ParsedRunMetrics {
   planner?: {
@@ -133,7 +132,11 @@ function inferSqlParserFromMetrics(metrics: ParsedRunMetrics): {
 }
 
 function normalizeNodeId(node: string): string {
-  return node === "getSchema" ? "schemaResolver" : node;
+  return node === "getSchema" || node === "schemaResolver"
+    ? "knowledgeLoader"
+    : node === "graphBuilder"
+      ? "knowledgeLoader"
+      : node;
 }
 
 export function parseMetricsFromLogs(
@@ -409,10 +412,11 @@ export interface WorkflowGraph {
 const ALL_NODES = [
   { id: "planner", label: "Planner" },
   { id: "answer", label: "Answer" },
-  { id: "schemaResolver", label: "Schema resolver" },
-  { id: "graphBuilder", label: "Relationship graph" },
+  { id: "knowledgeLoader", label: "Knowledge loader" },
   { id: "entityExtractor", label: "Entity extractor" },
+  { id: "semanticSearch", label: "Semantic search" },
   { id: "pathFinder", label: "Path finder" },
+  { id: "knowledgeExpansion", label: "Knowledge expansion" },
   { id: "operationPlanner", label: "Operation planner" },
   { id: "buildQuery", label: "Build query" },
   { id: "validateQuery", label: "Validate query" },
@@ -423,16 +427,17 @@ const ALL_NODES = [
 
 const GRAPH_EDGES: Array<{ from: string; to: string; label?: string }> = [
   { from: "planner", to: "answer", label: "non-SQL / off-domain" },
-  { from: "planner", to: "schemaResolver", label: "domain + SQL" },
-  { from: "schemaResolver", to: "graphBuilder" },
-  { from: "graphBuilder", to: "entityExtractor" },
-  { from: "entityExtractor", to: "pathFinder" },
-  { from: "pathFinder", to: "operationPlanner" },
+  { from: "planner", to: "knowledgeLoader", label: "domain + SQL" },
+  { from: "knowledgeLoader", to: "entityExtractor" },
+  { from: "entityExtractor", to: "semanticSearch" },
+  { from: "semanticSearch", to: "pathFinder" },
+  { from: "pathFinder", to: "knowledgeExpansion" },
+  { from: "knowledgeExpansion", to: "operationPlanner" },
   { from: "operationPlanner", to: "buildQuery" },
   { from: "buildQuery", to: "validateQuery" },
   { from: "validateQuery", to: "runQuery", label: "valid" },
   { from: "validateQuery", to: "formatResponse", label: "dry run" },
-  { from: "validateQuery", to: "buildQuery", label: "validation retry" },
+  { from: "validateQuery", to: "repairQuery", label: "validation retry" },
   { from: "validateQuery", to: "answer", label: "validation exhausted" },
   { from: "runQuery", to: "formatResponse", label: "success" },
   { from: "runQuery", to: "repairQuery", label: "execution retry" },
@@ -604,7 +609,7 @@ function resolveNodeState(
   if (nodeId === "runQuery" && metrics.totals.rowsReturned !== undefined) {
     state.rowCount = metrics.totals.rowsReturned;
   }
-  if (nodeId === "schemaResolver" && metrics.totals.tablesInSchema !== undefined) {
+  if (nodeId === "knowledgeLoader" && metrics.totals.tablesInSchema !== undefined) {
     state.tablesInSchema = metrics.totals.tablesInSchema;
   }
 
@@ -772,10 +777,11 @@ export function buildWorkflowGraph(
 const NODE_LABELS: Record<string, string> = {
   planner: "Planner",
   answer: "Answer",
-  schemaResolver: "Schema resolver",
-  graphBuilder: "Relationship graph",
+  knowledgeLoader: "Knowledge loader",
   entityExtractor: "Entity extractor",
+  semanticSearch: "Semantic search",
   pathFinder: "Path finder",
+  knowledgeExpansion: "Knowledge expansion",
   operationPlanner: "Operation planner",
   buildQuery: "Build query",
   validateQuery: "Validate query",

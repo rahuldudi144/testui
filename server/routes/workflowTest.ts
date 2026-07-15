@@ -94,6 +94,7 @@ interface RunWorkflowTestOptions {
 }
 
 interface QueryLoopContext {
+  userId: string;
   dbType: "postgres" | "mysql";
   activeDb: NonNullable<Awaited<ReturnType<typeof getActiveDatabaseForUser>>>;
   dbInfo: { dbType: string; name: string; host: string };
@@ -420,6 +421,7 @@ async function executeWorkflowTestRun(
   const emitActivity = createActivityEmitter(stream, savedRun.id);
 
   const queryContext: QueryLoopContext = {
+    userId,
     dbType,
     activeDb,
     dbInfo,
@@ -578,6 +580,7 @@ async function executeResumeWorkflowTestRun(
   const runStream = wrapStreamForRun(runId, stream);
   const emitActivity = createActivityEmitter(stream, runId);
   const queryContext: QueryLoopContext = {
+    userId,
     dbType,
     activeDb,
     dbInfo,
@@ -734,6 +737,7 @@ async function executeRerunFailuresInRun(
   const emitActivity = createActivityEmitter(stream, runId);
 
   const queryContext = {
+    userId,
     dbType,
     activeDb,
     dbInfo: {

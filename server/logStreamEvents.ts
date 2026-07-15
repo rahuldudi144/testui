@@ -7,10 +7,16 @@ interface LogStreamContext {
 
 const GRAPH_NODES: GraphNodeName[] = [
   "planner",
-  "schemaResolver",
+  "knowledgeLoader",
+  "entityExtractor",
+  "semanticSearch",
+  "pathFinder",
+  "knowledgeExpansion",
+  "operationPlanner",
   "buildQuery",
   "validateQuery",
   "runQuery",
+  "repairQuery",
   "formatResponse",
   "answer",
 ];
@@ -77,16 +83,6 @@ export function logEntryToAgentEvents(
     typeof log.rowCount === "number"
   ) {
     events.push({ type: "query_executed", rowCount: log.rowCount });
-  }
-
-  if (
-    eventName === "verification_attempt" &&
-    typeof log.answerSatisfied === "boolean"
-  ) {
-    events.push({
-      type: "answer_verification",
-      answered: log.answerSatisfied,
-    });
   }
 
   return events;

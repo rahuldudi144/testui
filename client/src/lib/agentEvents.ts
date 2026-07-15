@@ -1,10 +1,11 @@
 /** Mirrors DB-Agent stream event types for the testui client. */
 export type GraphNodeName =
   | "planner"
-  | "schemaResolver"
-  | "graphBuilder"
+  | "knowledgeLoader"
   | "entityExtractor"
+  | "semanticSearch"
   | "pathFinder"
+  | "knowledgeExpansion"
   | "operationPlanner"
   | "buildQuery"
   | "validateQuery"
@@ -85,10 +86,11 @@ export function reduceAgentEvent(
 /** Labels aligned with DB-Agent streaming/streamEvents.config.ts */
 const NODE_LABELS: Record<GraphNodeName, string> = {
   planner: "Planning",
-  schemaResolver: "Loading schema",
-  graphBuilder: "Building relationship graph",
-  entityExtractor: "Identifying entities",
+  knowledgeLoader: "Loading knowledge",
+  entityExtractor: "Extracting business concepts",
+  semanticSearch: "Semantic search",
   pathFinder: "Finding join paths",
+  knowledgeExpansion: "Expanding knowledge",
   operationPlanner: "Planning operations",
   buildQuery: "Generating SQL",
   validateQuery: "Validating SQL",

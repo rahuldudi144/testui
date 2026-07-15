@@ -7,7 +7,11 @@ import {
   toPublicAgent,
 } from "../userAgent.js";
 import { normalizeProviderInput } from "../llmProviders.js";
-import { validateAgentLlmFields } from "../validateAgentLlm.js";
+import {
+  normalizeEmbeddingProviderInput,
+  validateAgentEmbeddingFields,
+  validateAgentLlmFields,
+} from "../validateAgentLlm.js";
 
 type AuthUser = { id: string; username: string; createdAt: Date };
 
@@ -16,6 +20,13 @@ interface AgentLlmBody {
   modelName?: string | null;
   apiKey?: string | null;
   baseUrl?: string | null;
+}
+
+interface AgentEmbeddingBody {
+  embeddingProvider?: string | null;
+  embeddingModelName?: string | null;
+  embeddingApiKey?: string | null;
+  embeddingBaseUrl?: string | null;
 }
 
 function trimToNull(value?: string | null): string | null {
@@ -71,6 +82,71 @@ function resolveProviderFields(
   return { llmProvider, modelName, baseUrl };
 }
 
+function resolveEmbeddingFields(
+  body: AgentEmbeddingBody & { apiKey?: string | null },
+  existing?: {
+    embeddingProvider?: string | null;
+    embeddingModelName?: string | null;
+    embeddingApiKey?: string | null;
+    embeddingBaseUrl?: string | null;
+    apiKey?: string | null;
+  },
+): {
+  error?: string;
+  embeddingProvider: string | null;
+  embeddingModelName: string | null;
+  embeddingBaseUrl: string | null;
+} {
+  const embeddingProvider =
+    body.embeddingProvider !== undefined
+      ? normalizeEmbeddingProviderInput(body.embeddingProvider)
+      : normalizeEmbeddingProviderInput(existing?.embeddingProvider);
+
+  if (
+    body.embeddingProvider !== undefined &&
+    body.embeddingProvider?.trim() &&
+    !embeddingProvider
+  ) {
+    return {
+      error:
+        "Unsupported embedding provider. Use openai, local, ollama, or gemini.",
+      embeddingProvider: null,
+      embeddingModelName: null,
+      embeddingBaseUrl: null,
+    };
+  }
+
+  const embeddingModelName =
+    body.embeddingModelName !== undefined
+      ? trimToNull(body.embeddingModelName)
+      : existing?.embeddingModelName ?? null;
+  const embeddingBaseUrl =
+    body.embeddingBaseUrl !== undefined
+      ? trimToNull(body.embeddingBaseUrl)
+      : existing?.embeddingBaseUrl ?? null;
+
+  const validation = validateAgentEmbeddingFields({
+    embeddingProvider,
+    embeddingModelName,
+    embeddingApiKey: body.embeddingApiKey,
+    storedEmbeddingApiKey: existing?.embeddingApiKey,
+    embeddingBaseUrl,
+    chatApiKey: body.apiKey,
+    storedChatApiKey: existing?.apiKey,
+  });
+
+  if (validation.error) {
+    return {
+      error: validation.error,
+      embeddingProvider: validation.provider,
+      embeddingModelName,
+      embeddingBaseUrl,
+    };
+  }
+
+  return { embeddingProvider, embeddingModelName, embeddingBaseUrl };
+}
+
 export const agentRoutes = new Hono<{ Variables: { user: AuthUser } }>();
 
 agentRoutes.use("*", authMiddleware);
@@ -97,7 +173,8 @@ agentRoutes.post("/", async (c) => {
     name?: string;
     systemPrompt?: string;
     setActive?: boolean;
-  } & AgentLlmBody>();
+  } & AgentLlmBody &
+    AgentEmbeddingBody>();
 
   const name = body.name?.trim();
   const systemPrompt = body.systemPrompt?.trim() || null;
@@ -109,6 +186,11 @@ agentRoutes.post("/", async (c) => {
   const providerFields = resolveProviderFields(body);
   if (providerFields.error) {
     return c.json({ error: providerFields.error }, 400);
+  }
+
+  const embeddingFields = resolveEmbeddingFields(body);
+  if (embeddingFields.error) {
+    return c.json({ error: embeddingFields.error }, 400);
   }
 
   const existingCount = await prisma.agentProfile.count({
@@ -124,6 +206,10 @@ agentRoutes.post("/", async (c) => {
       modelName: providerFields.modelName,
       apiKey: trimToNull(body.apiKey),
       baseUrl: providerFields.baseUrl,
+      embeddingProvider: embeddingFields.embeddingProvider,
+      embeddingModelName: embeddingFields.embeddingModelName,
+      embeddingApiKey: trimToNull(body.embeddingApiKey),
+      embeddingBaseUrl: embeddingFields.embeddingBaseUrl,
     },
   });
 
@@ -140,7 +226,8 @@ agentRoutes.patch("/:id", async (c) => {
   const body = await c.req.json<{
     name?: string;
     systemPrompt?: string;
-  } & AgentLlmBody>();
+  } & AgentLlmBody &
+    AgentEmbeddingBody>();
 
   const existing = await prisma.agentProfile.findFirst({
     where: { id, userId: user.id },
@@ -160,8 +247,18 @@ agentRoutes.patch("/:id", async (c) => {
     return c.json({ error: providerFields.error }, 400);
   }
 
+  const embeddingFields = resolveEmbeddingFields(body, existing);
+  if (embeddingFields.error) {
+    return c.json({ error: embeddingFields.error }, 400);
+  }
+
   const trimmedApiKey = body.apiKey?.trim();
   const apiKey = trimmedApiKey ? trimmedApiKey : existing.apiKey;
+
+  const trimmedEmbeddingApiKey = body.embeddingApiKey?.trim();
+  const embeddingApiKey = trimmedEmbeddingApiKey
+    ? trimmedEmbeddingApiKey
+    : existing.embeddingApiKey;
 
   const agent = await prisma.agentProfile.update({
     where: { id },
@@ -172,6 +269,10 @@ agentRoutes.patch("/:id", async (c) => {
       modelName: providerFields.modelName,
       baseUrl: providerFields.baseUrl,
       apiKey,
+      embeddingProvider: embeddingFields.embeddingProvider,
+      embeddingModelName: embeddingFields.embeddingModelName,
+      embeddingBaseUrl: embeddingFields.embeddingBaseUrl,
+      embeddingApiKey,
     },
   });
 
@@ -201,10 +302,14 @@ agentRoutes.delete("/:id", async (c) => {
     return c.json({ error: "Agent profile not found." }, 404);
   }
 
+  const userRow = await prisma.user.findUnique({
+    where: { id: user.id },
+    select: { activeAgentId: true },
+  });
+
   await prisma.agentProfile.delete({ where: { id } });
 
-  const userRecord = await prisma.user.findUnique({ where: { id: user.id } });
-  if (userRecord?.activeAgentId === id) {
+  if (userRow?.activeAgentId === id) {
     const fallback = await prisma.agentProfile.findFirst({
       where: { userId: user.id },
       orderBy: { updatedAt: "desc" },

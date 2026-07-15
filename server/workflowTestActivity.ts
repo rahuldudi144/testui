@@ -36,7 +36,7 @@ export function formatWorkflowActivityLog(
   if (event === "db_fetch_schema") {
     const count =
       typeof entry.tableCount === "number" ? ` (${entry.tableCount} tables)` : "";
-    return `Database: schema loaded${count}`;
+    return `Knowledge: schema snapshot for indexing${count}`;
   }
 
   return null;

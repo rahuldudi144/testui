@@ -52,10 +52,19 @@ describe("relationshipGraph debug helpers", () => {
     });
   });
 
-  test("parseRelationshipGraphFromDebug reads graphBuilder stateHistory", () => {
+  test("parseRelationshipGraphFromDebug reads knowledgeLoader stateHistory", () => {
     const graph = parseRelationshipGraphFromDebug({
       stateHistory: [
         { step: 1, node: "planner", changes: {} },
+        { step: 2, node: "knowledgeLoader", changes: { graph: sampleGraph } },
+      ],
+    });
+    expect(graph).toEqual(sampleGraph);
+  });
+
+  test("parseRelationshipGraphFromDebug falls back to legacy graphBuilder", () => {
+    const graph = parseRelationshipGraphFromDebug({
+      stateHistory: [
         { step: 2, node: "graphBuilder", changes: { graph: sampleGraph } },
       ],
     });
@@ -87,13 +96,30 @@ describe("relationshipGraph debug helpers", () => {
     ).toEqual(operations);
   });
 
-  test("parseEntitiesFromDebug reads entityExtractor stateHistory", () => {
+  test("parseEntitiesFromDebug reads knowledgeExpansion stateHistory", () => {
     const entities = ["Enrollment", "Course"];
     expect(
       parseEntitiesFromDebug({
-        stateHistory: [{ step: 2, node: "entityExtractor", changes: { entities } }],
+        stateHistory: [
+          { step: 5, node: "knowledgeExpansion", changes: { entities } },
+        ],
       }),
     ).toEqual(entities);
+  });
+
+  test("parseEntitiesFromDebug falls back to businessConcepts", () => {
+    const businessConcepts = ["enrollment", "course"];
+    expect(
+      parseEntitiesFromDebug({
+        stateHistory: [
+          {
+            step: 2,
+            node: "entityExtractor",
+            changes: { businessConcepts },
+          },
+        ],
+      }),
+    ).toEqual(businessConcepts);
   });
 
   test("layoutRelationshipGraph produces positioned nodes and edges", () => {

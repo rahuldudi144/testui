@@ -33,6 +33,8 @@ export interface UserDatabase {
   dbType: "postgres" | "mysql";
   dbUri: string;
   host: string;
+  knowledgeDbUri: string | null;
+  hasEnvKnowledgeDbUri: boolean;
   businessContext: string | null;
   schemaSyncStatus: SchemaSyncStatus;
   schemaSyncedAt: string | null;
@@ -58,6 +60,8 @@ export type LlmProvider =
   | "vllm"
   | "litellm";
 
+export type EmbeddingProvider = "openai" | "local" | "ollama" | "gemini";
+
 export interface AgentSummary {
   id: string;
   name: string;
@@ -74,6 +78,10 @@ export interface UserAgent {
   modelName: string | null;
   baseUrl: string | null;
   hasApiKey: boolean;
+  embeddingProvider: string | null;
+  embeddingModelName: string | null;
+  embeddingBaseUrl: string | null;
+  hasEmbeddingApiKey: boolean;
   createdAt: string;
   updatedAt: string;
 }
@@ -83,6 +91,13 @@ export interface AgentLlmInput {
   modelName?: string | null;
   apiKey?: string | null;
   baseUrl?: string | null;
+}
+
+export interface AgentEmbeddingInput {
+  embeddingProvider?: EmbeddingProvider | string | null;
+  embeddingModelName?: string | null;
+  embeddingApiKey?: string | null;
+  embeddingBaseUrl?: string | null;
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -167,7 +182,8 @@ export async function createAgentProfile(
     name: string;
     systemPrompt?: string;
     setActive?: boolean;
-  } & AgentLlmInput,
+  } & AgentLlmInput &
+    AgentEmbeddingInput,
 ): Promise<UserAgent> {
   const data = await request<{ agent: UserAgent }>("/api/agents", {
     method: "POST",
@@ -178,7 +194,8 @@ export async function createAgentProfile(
 
 export async function updateAgentProfile(
   id: string,
-  input: { name?: string; systemPrompt?: string } & AgentLlmInput,
+  input: { name?: string; systemPrompt?: string } & AgentLlmInput &
+    AgentEmbeddingInput,
 ): Promise<UserAgent> {
   const data = await request<{ agent: UserAgent }>(`/api/agents/${id}`, {
     method: "PATCH",
@@ -202,10 +219,9 @@ export async function createDatabase(input: {
   name: string;
   dbType: "postgres" | "mysql";
   dbUri: string;
+  knowledgeDbUri?: string;
   businessContext?: string;
   setActive?: boolean;
-  fetchSchema?: boolean;
-  dbMetadata?: unknown;
 }): Promise<{ database: UserDatabase; warning?: string }> {
   const data = await request<{ database: UserDatabase; warning?: string }>(
     "/api/databases",
@@ -223,6 +239,7 @@ export async function updateDatabase(
     name?: string;
     dbType?: "postgres" | "mysql";
     dbUri?: string;
+    knowledgeDbUri?: string | null;
     businessContext?: string;
     dbMetadata?: unknown;
   },
@@ -237,12 +254,106 @@ export async function updateDatabase(
   return data.database;
 }
 
+export type KnowledgeIndexEvent =
+  | { type: "knowledge_progress"; table: string; completed: number; total: number }
+  | { type: "knowledge_completed" }
+  | { type: "knowledge_failed"; table: string; error: string }
+  | { type: "status"; message: string }
+  | { type: "done"; database: UserDatabase }
+  | { type: "error"; message: string; database?: UserDatabase };
+
+/** Stream knowledge indexing progress via SSE. */
+export async function indexDatabaseKnowledge(
+  id: string,
+  options?: {
+    onEvent?: (event: KnowledgeIndexEvent) => void;
+    signal?: AbortSignal;
+  },
+): Promise<UserDatabase> {
+  const res = await fetch(`/api/databases/${id}/index-knowledge`, {
+    method: "POST",
+    credentials: "include",
+    signal: options?.signal,
+  });
+
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(
+      (data as { error?: string }).error ?? `Request failed (${res.status})`,
+    );
+  }
+
+  const body = res.body;
+  if (!body) {
+    throw new Error("Knowledge index response had no body.");
+  }
+
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let finalDatabase: UserDatabase | undefined;
+  let lastError: string | undefined;
+
+  const flushEvent = (rawEvent: string, rawData: string) => {
+    if (!rawData) return;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(rawData);
+    } catch {
+      return;
+    }
+    const eventType = rawEvent || (parsed as { type?: string }).type || "message";
+    const payload =
+      typeof parsed === "object" && parsed !== null
+        ? { ...(parsed as object), type: (parsed as { type?: string }).type ?? eventType }
+        : { type: eventType, data: parsed };
+
+    const typed = payload as KnowledgeIndexEvent;
+    options?.onEvent?.(typed);
+
+    if (typed.type === "done" && "database" in typed && typed.database) {
+      finalDatabase = typed.database;
+    }
+    if (typed.type === "error" && "message" in typed) {
+      lastError = typed.message;
+      if (typed.database) finalDatabase = typed.database;
+    }
+  };
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+
+    let sep: number;
+    while ((sep = buffer.indexOf("\n\n")) >= 0) {
+      const chunk = buffer.slice(0, sep);
+      buffer = buffer.slice(sep + 2);
+      let eventName = "";
+      let dataLines: string[] = [];
+      for (const line of chunk.split("\n")) {
+        if (line.startsWith("event:")) {
+          eventName = line.slice(6).trim();
+        } else if (line.startsWith("data:")) {
+          dataLines.push(line.slice(5).trim());
+        }
+      }
+      flushEvent(eventName, dataLines.join("\n"));
+    }
+  }
+
+  if (lastError) {
+    throw new Error(lastError);
+  }
+  if (!finalDatabase) {
+    throw new Error("Knowledge indexing finished without a database payload.");
+  }
+  return finalDatabase;
+}
+
+/** @deprecated Use indexDatabaseKnowledge */
 export async function syncDatabaseSchema(id: string): Promise<UserDatabase> {
-  const data = await request<{ database: UserDatabase }>(
-    `/api/databases/${id}/sync-schema`,
-    { method: "POST" },
-  );
-  return data.database;
+  return indexDatabaseKnowledge(id);
 }
 
 export async function activateDatabase(id: string): Promise<UserDatabase> {

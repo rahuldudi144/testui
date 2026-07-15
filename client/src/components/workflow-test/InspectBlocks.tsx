@@ -1,6 +1,7 @@
 import type { ReactNode } from "react";
 import { formatStateFieldValue } from "../debug/formatStateValue";
 import { cn } from "../../lib/cn";
+import { nodeStreamLabel } from "../../lib/agentStreamLabels";
 
 export function InspectSection({
   title,
@@ -120,8 +121,11 @@ export function WorkflowPathPills({ path }: { path: string[] }) {
     <div className="flex flex-wrap gap-1.5">
       {path.map((node, index) => (
         <span key={`${node}-${index}`} className="inline-flex items-center gap-1.5">
-          <span className="rounded-md border border-border bg-muted/30 px-2 py-0.5 font-mono text-[11px] text-foreground">
-            {node}
+          <span
+            className="rounded-md border border-border bg-muted/30 px-2 py-0.5 text-[11px] text-foreground"
+            title={node}
+          >
+            {nodeStreamLabel(node)}
           </span>
           {index < path.length - 1 && (
             <span className="text-muted-foreground" aria-hidden>

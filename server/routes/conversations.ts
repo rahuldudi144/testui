@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import { prisma } from "../db.js";
 import { extractSqlFromMarkdown, toAgentMessages } from "../agent.js";
-import type { StateHistoryEntry } from "../../../schemas/state.js";
+import type { StateHistoryEntry } from "../../../types/index.js";
 import {
   buildAgentRunContext,
   buildFullDebugPayload,
@@ -16,9 +16,8 @@ import {
   streamAgentEvents,
 } from "../runAgentWithHistory.js";
 import { isPublicStreamEvent } from "../streamEventFilter.js";
-import { getActiveDatabaseForUser, parseDbHost, connectionAgentMetadata } from "../userDatabase.js";
+import { getActiveDatabaseForUser, parseDbHost, connectionAgentInvokeInput, countTables } from "../userDatabase.js";
 import { getActiveAgentForUser, profileAgentConfig } from "../userAgent.js";
-import { countTables } from "../syncConnectionSchema.js";
 import {
   generateConversationTitle,
   isDefaultConversationTitle,
@@ -29,6 +28,7 @@ import {
 } from "../extractRunMetrics.js";
 import { insertChatQueryExecution } from "../queryExecution.js";
 import { isAbortError } from "../../../utils/abort.js";
+import { errorMessage } from "../../../utils/errors.js";
 
 type AuthUser = { id: string; username: string; createdAt: Date };
 
@@ -233,9 +233,12 @@ conversationRoutes.post("/:id/messages", async (c) => {
     maxValidationRetries: env.DB_AGENT_MAX_VALIDATION_RETRIES,
   };
 
-  const agentInputBase = {
-    ...connectionAgentMetadata(activeDb),
-  };
+  let agentInputBase: ReturnType<typeof connectionAgentInvokeInput>;
+  try {
+    agentInputBase = connectionAgentInvokeInput(activeDb, user.id);
+  } catch (error) {
+    return c.json({ error: errorMessage(error) }, 400);
+  }
 
   if (!streamEvents && dryRun) {
     return streamSSE(c, async (stream) => {
@@ -293,6 +296,7 @@ conversationRoutes.post("/:id/messages", async (c) => {
               : 0,
             metadataSource: activeDb.dbMetadata ? "stored" : "live",
             hasBusinessContext: Boolean(activeDb.businessContext?.trim()),
+            hasKnowledgeIndexed: activeDb.schemaSyncStatus === "ready",
           },
           runContext,
           { generatedSql, stateHistory },
@@ -456,6 +460,7 @@ conversationRoutes.post("/:id/messages", async (c) => {
             : 0,
           metadataSource: activeDb.dbMetadata ? "stored" : "live",
           hasBusinessContext: Boolean(activeDb.businessContext?.trim()),
+          hasKnowledgeIndexed: activeDb.schemaSyncStatus === "ready",
         },
         runContext,
         { generatedSql, stateHistory, streamEvents: collectedEvents, ...tokenTotals },

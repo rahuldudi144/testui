@@ -1,8 +1,20 @@
 import type { DatabaseType } from "../../types/index.js";
 import { prisma } from "./db.js";
-import { countTables } from "./syncConnectionSchema.js";
+import { loadEnv } from "./env.js";
 
 export type SchemaSyncStatus = "idle" | "syncing" | "ready" | "failed";
+
+export function countTables(metadata: unknown): number {
+  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) {
+    return 0;
+  }
+  const record = metadata as Record<string, unknown>;
+  const tables = record.tables;
+  if (tables && typeof tables === "object" && !Array.isArray(tables)) {
+    return Object.keys(tables).length;
+  }
+  return 0;
+}
 
 export interface UserDatabase {
   id: string;
@@ -10,6 +22,9 @@ export interface UserDatabase {
   dbType: DatabaseType;
   dbUri: string;
   host: string;
+  knowledgeDbUri: string | null;
+  /** True when env KNOWLEDGE_DB_URI can fill in for a missing per-connection URI. */
+  hasEnvKnowledgeDbUri: boolean;
   businessContext: string | null;
   schemaSyncStatus: SchemaSyncStatus;
   schemaSyncedAt: string | null;
@@ -30,11 +45,46 @@ export function parseDbHost(dbUri: string): string {
   }
 }
 
+export function resolveKnowledgeDbUri(connection: {
+  knowledgeDbUri?: string | null;
+}): string {
+  const fromConnection = connection.knowledgeDbUri?.trim();
+  if (fromConnection) return fromConnection;
+
+  const fromEnv = loadEnv().KNOWLEDGE_DB_URI?.trim();
+  if (fromEnv) return fromEnv;
+
+  throw new Error(
+    "Knowledge database URI is not configured. Set KNOWLEDGE_DB_URI or add a knowledge DB URI on this connection.",
+  );
+}
+
+/** InvokeInput knowledge fields derived from a stored connection + user. */
+export function connectionAgentInvokeInput(connection: {
+  id: string;
+  knowledgeDbUri?: string | null;
+  businessContext?: string | null;
+}, userId: string): {
+  knowledgeDbUri: string;
+  userId: string;
+  databaseId: string;
+  businessSummary?: string;
+} {
+  const businessSummary = connection.businessContext?.trim();
+  return {
+    knowledgeDbUri: resolveKnowledgeDbUri(connection),
+    userId,
+    databaseId: connection.id,
+    businessSummary: businessSummary || undefined,
+  };
+}
+
 export function toPublicDatabase(row: {
   id: string;
   name: string;
   dbType: string;
   dbUri: string;
+  knowledgeDbUri?: string | null;
   businessContext?: string | null;
   dbMetadata?: unknown;
   schemaSyncStatus?: string;
@@ -44,12 +94,15 @@ export function toPublicDatabase(row: {
   updatedAt: Date;
 }): UserDatabase {
   const businessContext = row.businessContext ?? null;
+  const knowledgeDbUri = row.knowledgeDbUri?.trim() || null;
   return {
     id: row.id,
     name: row.name,
     dbType: row.dbType as DatabaseType,
     dbUri: row.dbUri,
     host: parseDbHost(row.dbUri),
+    knowledgeDbUri,
+    hasEnvKnowledgeDbUri: Boolean(loadEnv().KNOWLEDGE_DB_URI?.trim()),
     businessContext,
     schemaSyncStatus: (row.schemaSyncStatus ?? "idle") as SchemaSyncStatus,
     schemaSyncedAt: row.schemaSyncedAt?.toISOString() ?? null,
@@ -92,18 +145,4 @@ export async function setActiveDatabase(userId: string, databaseId: string) {
 
 export function validateDbType(dbType: string): dbType is DatabaseType {
   return dbType === "postgres" || dbType === "mysql";
-}
-
-export function connectionAgentMetadata(connection: {
-  businessContext?: string | null;
-  dbMetadata?: unknown;
-}): {
-  businessContext?: string;
-  dbMetadata?: unknown;
-} {
-  const businessContext = connection.businessContext?.trim();
-  return {
-    businessContext: businessContext || undefined,
-    dbMetadata: connection.dbMetadata ?? undefined,
-  };
 }

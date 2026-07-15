@@ -14,7 +14,7 @@ import {
   formatWorkflowAgentError,
   type QueryRunResult,
 } from "./stressTestAnalyze.js";
-import { connectionAgentMetadata } from "./userDatabase.js";
+import { connectionAgentInvokeInput } from "./userDatabase.js";
 import type { profileAgentConfig } from "./userAgent.js";
 import { enrichQueryRunResult } from "./workflowTestObservability.js";
 import { subscribeWorkflowActivity } from "./workflowTestActivity.js";
@@ -35,6 +35,7 @@ const EMPTY_METRICS = {
 };
 
 type QueryContext = {
+  userId: string;
   dbType: DbType;
   activeDb: ActiveDb;
   dbInfo: DbInfo;
@@ -88,8 +89,10 @@ interface AgentConfig {
 }
 
 interface ActiveDb {
+  id: string;
   dbType: string;
   dbUri: string;
+  knowledgeDbUri?: string | null;
   dbMetadata?: unknown;
   businessContext?: string | null;
 }
@@ -135,6 +138,7 @@ async function runQueryItem(
 ): Promise<{ result: QueryRunResult; metrics: ReturnType<typeof extractMetricsFromDebug>; ranAt: Date }> {
   const { groupName, query } = item;
   const {
+    userId,
     dbType,
     activeDb,
     dbInfo,
@@ -177,7 +181,7 @@ async function runQueryItem(
         requestId,
         correlationId,
         abortSignal,
-        ...connectionAgentMetadata(activeDb),
+        ...connectionAgentInvokeInput(activeDb, userId),
       },
       runnerOptions,
     );

@@ -770,7 +770,7 @@ export function DebugPanel({
             ) : graph ? (
               <>
                 {relationshipGraph && (
-                  <Section title="Relationship graph · graphBuilder">
+                  <Section title="Relationship graph · knowledgeLoader">
                     <RelationshipGraphView graph={relationshipGraph} />
                   </Section>
                 )}

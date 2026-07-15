@@ -1,5 +1,5 @@
 import type { InvokeResult } from "../../types/index.js";
-import type { StateHistoryEntry } from "../../schemas/state.js";
+import type { StateHistoryEntry } from "../../types/index.js";
 import { AgentError, errorMessage } from "../../utils/errors.js";
 
 export type StressRunStatus = "pass" | "fail" | "error" | "planner_skip";
@@ -95,10 +95,11 @@ interface GraphNodeSummary {
 const NODE_LABELS: Record<string, string> = {
   planner: "Planner",
   answer: "Answer",
-  schemaResolver: "Schema resolver",
-  graphBuilder: "Relationship graph",
+  knowledgeLoader: "Knowledge loader",
   entityExtractor: "Entity extractor",
+  semanticSearch: "Semantic search",
   pathFinder: "Path finder",
+  knowledgeExpansion: "Knowledge expansion",
   operationPlanner: "Operation planner",
   buildQuery: "Build query",
   validateQuery: "Validate query",
@@ -133,7 +134,10 @@ function parseStateHistory(value: unknown): StateHistoryEntry[] {
 }
 
 function normalizeNodeId(node: string): string {
-  return node === "getSchema" ? "schemaResolver" : node;
+  if (node === "getSchema" || node === "schemaResolver" || node === "graphBuilder") {
+    return "knowledgeLoader";
+  }
+  return node;
 }
 
 /** Format agent failures for workflow test result rows. */
@@ -159,6 +163,9 @@ function failurePhaseForNode(node: string | undefined): FailurePhase {
     node === "operationPlanner" ||
     node === "entityExtractor" ||
     node === "pathFinder" ||
+    node === "knowledgeLoader" ||
+    node === "semanticSearch" ||
+    node === "knowledgeExpansion" ||
     node === "graphBuilder" ||
     node === "schemaResolver"
   ) {

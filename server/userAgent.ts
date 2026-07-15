@@ -1,6 +1,19 @@
-import type { LlmProvider } from "../../types/index.js";
+import type {
+  EmbeddingProvider as CoreEmbeddingProvider,
+  LlmProvider,
+} from "../../types/index.js";
 import type { AgentConfigOverrides } from "./agent.js";
 import { prisma } from "./db.js";
+import { normalizeEmbeddingProviderInput } from "./validateAgentLlm.js";
+
+function resolveOllamaEmbeddingBaseUrl(
+  baseUrl?: string | null,
+): string | undefined {
+  const trimmed = baseUrl?.trim();
+  if (!trimmed) return undefined;
+  // Native OllamaEmbeddings expects host without /v1 suffix.
+  return trimmed.replace(/\/v1\/?$/, "");
+}
 
 export interface UserAgent {
   id: string;
@@ -11,6 +24,10 @@ export interface UserAgent {
   modelName: string | null;
   baseUrl: string | null;
   hasApiKey: boolean;
+  embeddingProvider: string | null;
+  embeddingModelName: string | null;
+  embeddingBaseUrl: string | null;
+  hasEmbeddingApiKey: boolean;
   createdAt: string;
   updatedAt: string;
 }
@@ -23,6 +40,10 @@ export function toPublicAgent(row: {
   modelName?: string | null;
   apiKey?: string | null;
   baseUrl?: string | null;
+  embeddingProvider?: string | null;
+  embeddingModelName?: string | null;
+  embeddingApiKey?: string | null;
+  embeddingBaseUrl?: string | null;
   createdAt: Date;
   updatedAt: Date;
 }): UserAgent {
@@ -36,6 +57,10 @@ export function toPublicAgent(row: {
     modelName: row.modelName ?? null,
     baseUrl: row.baseUrl ?? null,
     hasApiKey: Boolean(row.apiKey?.trim()),
+    embeddingProvider: row.embeddingProvider ?? null,
+    embeddingModelName: row.embeddingModelName ?? null,
+    embeddingBaseUrl: row.embeddingBaseUrl ?? null,
+    hasEmbeddingApiKey: Boolean(row.embeddingApiKey?.trim()),
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
   };
@@ -73,6 +98,10 @@ export function profileAgentConfig(
     modelName?: string | null;
     apiKey?: string | null;
     baseUrl?: string | null;
+    embeddingProvider?: string | null;
+    embeddingModelName?: string | null;
+    embeddingApiKey?: string | null;
+    embeddingBaseUrl?: string | null;
   } | null,
 ): AgentConfigOverrides {
   const systemPrompt = agent?.systemPrompt?.trim();
@@ -81,13 +110,29 @@ export function profileAgentConfig(
   const apiKey = agent?.apiKey?.trim();
   const baseUrl = agent?.baseUrl?.trim();
 
+  const embeddingProvider = normalizeEmbeddingProviderInput(
+    agent?.embeddingProvider,
+  ) as CoreEmbeddingProvider | null;
+  const embeddingModelName = agent?.embeddingModelName?.trim();
+  const embeddingApiKey = agent?.embeddingApiKey?.trim();
+  const rawEmbeddingBaseUrl = agent?.embeddingBaseUrl?.trim();
+  const embeddingBaseUrl =
+    embeddingProvider === "ollama"
+      ? resolveOllamaEmbeddingBaseUrl(rawEmbeddingBaseUrl)
+      : rawEmbeddingBaseUrl || undefined;
+
   return {
     systemPrompt: systemPrompt || undefined,
     llmProvider: provider || undefined,
     modelName: modelName || undefined,
     apiKey: apiKey || undefined,
     ollamaBaseUrl: provider === "ollama" ? baseUrl || undefined : undefined,
-    baseUrl: provider && provider !== "ollama" ? baseUrl || undefined : undefined,
+    baseUrl:
+      provider && provider !== "ollama" ? baseUrl || undefined : undefined,
+    embeddingProvider: embeddingProvider || undefined,
+    embeddingModelName: embeddingModelName || undefined,
+    embeddingApiKey: embeddingApiKey || undefined,
+    embeddingBaseUrl,
   };
 }
 

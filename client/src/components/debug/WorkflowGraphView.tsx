@@ -44,18 +44,19 @@ export interface WorkflowGraphData {
 
 const NODE_LAYOUT: Record<string, { row: number; col: number }> = {
   planner: { row: 0, col: 1 },
-  schemaResolver: { row: 1, col: 1 },
-  graphBuilder: { row: 2, col: 1 },
-  entityExtractor: { row: 3, col: 1 },
+  knowledgeLoader: { row: 1, col: 1 },
+  entityExtractor: { row: 2, col: 1 },
+  semanticSearch: { row: 3, col: 1 },
   pathFinder: { row: 4, col: 1 },
-  operationPlanner: { row: 5, col: 1 },
-  buildQuery: { row: 6, col: 1 },
-  validateQuery: { row: 7, col: 1 },
-  runQuery: { row: 8, col: 2 },
-  repairQuery: { row: 8, col: 0 },
-  formatResponse: { row: 9, col: 1 },
+  knowledgeExpansion: { row: 5, col: 1 },
+  operationPlanner: { row: 6, col: 1 },
+  buildQuery: { row: 7, col: 1 },
+  validateQuery: { row: 8, col: 1 },
+  runQuery: { row: 9, col: 2 },
+  repairQuery: { row: 9, col: 0 },
+  formatResponse: { row: 10, col: 1 },
   /** Terminal / failure path */
-  answer: { row: 10, col: 0 },
+  answer: { row: 11, col: 0 },
 };
 
 /** Retry / branch edges — drawn as curves so they don't overlap forward paths. */
@@ -722,22 +723,31 @@ export function parseGraphFromDebug(
     .filter((e) => e.event === "node_end")
     .map((e) => {
       const node = typeof e.node === "string" ? e.node : null;
-      return node === "getSchema" ? "schemaResolver" : node;
+      if (!node) return null;
+      if (node === "getSchema" || node === "schemaResolver" || node === "graphBuilder") {
+        return "knowledgeLoader";
+      }
+      return node;
     })
     .filter((n): n is string => Boolean(n));
 
-  const path = pathFromTimeline.length > 0 ? pathFromTimeline : nodesExecuted.map((n) =>
-    n === "getSchema" ? "schemaResolver" : n,
-  );
+  const path = pathFromTimeline.length > 0
+    ? pathFromTimeline
+    : nodesExecuted.map((n) =>
+        n === "getSchema" || n === "schemaResolver" || n === "graphBuilder"
+          ? "knowledgeLoader"
+          : n,
+      );
   if (path.length === 0) return null;
 
   const ALL = [
     "planner",
     "answer",
-    "schemaResolver",
-    "graphBuilder",
+    "knowledgeLoader",
     "entityExtractor",
+    "semanticSearch",
     "pathFinder",
+    "knowledgeExpansion",
     "operationPlanner",
     "buildQuery",
     "validateQuery",
@@ -749,10 +759,11 @@ export function parseGraphFromDebug(
   const labels: Record<string, string> = {
     planner: "Planner",
     answer: "Answer",
-    schemaResolver: "Schema resolver",
-    graphBuilder: "Relationship graph",
+    knowledgeLoader: "Knowledge loader",
     entityExtractor: "Entity extractor",
+    semanticSearch: "Semantic search",
     pathFinder: "Path finder",
+    knowledgeExpansion: "Knowledge expansion",
     operationPlanner: "Operation planner",
     buildQuery: "Build query",
     validateQuery: "Validate query",
@@ -809,16 +820,17 @@ export function parseGraphFromDebug(
 
 const FALLBACK_EDGES: Array<{ from: string; to: string; label?: string }> = [
   { from: "planner", to: "answer", label: "non-SQL / off-domain" },
-  { from: "planner", to: "schemaResolver", label: "domain + SQL" },
-  { from: "schemaResolver", to: "graphBuilder" },
-  { from: "graphBuilder", to: "entityExtractor" },
-  { from: "entityExtractor", to: "pathFinder" },
-  { from: "pathFinder", to: "operationPlanner" },
+  { from: "planner", to: "knowledgeLoader", label: "domain + SQL" },
+  { from: "knowledgeLoader", to: "entityExtractor" },
+  { from: "entityExtractor", to: "semanticSearch" },
+  { from: "semanticSearch", to: "pathFinder" },
+  { from: "pathFinder", to: "knowledgeExpansion" },
+  { from: "knowledgeExpansion", to: "operationPlanner" },
   { from: "operationPlanner", to: "buildQuery" },
   { from: "buildQuery", to: "validateQuery" },
   { from: "validateQuery", to: "runQuery", label: "valid" },
   { from: "validateQuery", to: "formatResponse", label: "dry run" },
-  { from: "validateQuery", to: "buildQuery", label: "validation retry" },
+  { from: "validateQuery", to: "repairQuery", label: "validation retry" },
   { from: "validateQuery", to: "answer", label: "validation exhausted" },
   { from: "runQuery", to: "formatResponse", label: "success" },
   { from: "runQuery", to: "repairQuery", label: "execution retry" },
