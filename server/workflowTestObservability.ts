@@ -246,6 +246,90 @@ export function collectFailedForRerun(
     .filter((result) => result.status === "fail" || result.status === "error");
 }
 
+export type RerunSetupGroup = {
+  name: string;
+  queries: string[];
+  categoryType?: string;
+  execution?: {
+    history?: "KEEP" | "RESET";
+    expectedOutcome?: string;
+    stopOnFailure?: boolean;
+    timeoutMs?: number;
+  } | null;
+};
+
+export type FailedRerunSelection = {
+  item: QueryRunResult;
+  override: {
+    categoryType?: string | null;
+    execution?: RerunSetupGroup["execution"];
+  } | null;
+};
+
+/**
+ * Prefer Setup groups (Load failures → editable groups) to pick which failed
+ * rows to rerun and which category/execution to apply. Falls back to all
+ * fail/error rows when groups are omitted.
+ */
+export function selectFailedItemsForRerun(
+  results: QueryRunResult[],
+  options?: {
+    groups?: RerunSetupGroup[] | null;
+    categoryType?: string;
+    execution?: RerunSetupGroup["execution"];
+  },
+): FailedRerunSelection[] {
+  const failed = collectFailedForRerun(results);
+  const globalOverride =
+    options?.categoryType !== undefined || options?.execution !== undefined
+      ? {
+          categoryType: options.categoryType,
+          execution: options.execution,
+        }
+      : null;
+
+  if (!options?.groups || options.groups.length === 0) {
+    return failed.map((item) => ({ item, override: globalOverride }));
+  }
+
+  const remaining = [...failed];
+  const selected: FailedRerunSelection[] = [];
+
+  for (const group of options.groups) {
+    const groupName = group.name.trim();
+    for (const rawQuery of group.queries) {
+      const query = rawQuery.trim();
+      if (!query) continue;
+
+      let idx = remaining.findIndex(
+        (item) =>
+          item.query.trim() === query &&
+          item.groupName.trim().toLowerCase() === groupName.toLowerCase(),
+      );
+      if (idx < 0) {
+        idx = remaining.findIndex((item) => item.query.trim() === query);
+      }
+      if (idx < 0) continue;
+
+      const [item] = remaining.splice(idx, 1);
+      selected.push({
+        item: item!,
+        override: {
+          categoryType: group.categoryType ?? globalOverride?.categoryType,
+          // Always apply Setup category defaults unless the group has advanced
+          // execution overrides (matches resolveRerunItemPolicy contract).
+          execution:
+            group.execution !== undefined
+              ? group.execution
+              : (globalOverride?.execution ?? null),
+        },
+      });
+    }
+  }
+
+  return selected;
+}
+
 export function mergeRerunAttempt(
   existing: QueryRunResult,
   rerunResult: QueryRunResult,

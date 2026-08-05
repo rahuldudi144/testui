@@ -27,6 +27,7 @@ export interface UserAgent {
   embeddingProvider: string | null;
   embeddingModelName: string | null;
   embeddingBaseUrl: string | null;
+  embeddingDimension: number | null;
   hasEmbeddingApiKey: boolean;
   createdAt: string;
   updatedAt: string;
@@ -44,6 +45,7 @@ export function toPublicAgent(row: {
   embeddingModelName?: string | null;
   embeddingApiKey?: string | null;
   embeddingBaseUrl?: string | null;
+  embeddingDimension?: number | null;
   createdAt: Date;
   updatedAt: Date;
 }): UserAgent {
@@ -60,6 +62,7 @@ export function toPublicAgent(row: {
     embeddingProvider: row.embeddingProvider ?? null,
     embeddingModelName: row.embeddingModelName ?? null,
     embeddingBaseUrl: row.embeddingBaseUrl ?? null,
+    embeddingDimension: row.embeddingDimension ?? null,
     hasEmbeddingApiKey: Boolean(row.embeddingApiKey?.trim()),
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
@@ -102,6 +105,7 @@ export function profileAgentConfig(
     embeddingModelName?: string | null;
     embeddingApiKey?: string | null;
     embeddingBaseUrl?: string | null;
+    embeddingDimension?: number | null;
   } | null,
 ): AgentConfigOverrides {
   const systemPrompt = agent?.systemPrompt?.trim();
@@ -120,6 +124,12 @@ export function profileAgentConfig(
     embeddingProvider === "ollama"
       ? resolveOllamaEmbeddingBaseUrl(rawEmbeddingBaseUrl)
       : rawEmbeddingBaseUrl || undefined;
+  const embeddingDimension =
+    typeof agent?.embeddingDimension === "number" &&
+    Number.isInteger(agent.embeddingDimension) &&
+    agent.embeddingDimension > 0
+      ? agent.embeddingDimension
+      : undefined;
 
   return {
     systemPrompt: systemPrompt || undefined,
@@ -133,6 +143,7 @@ export function profileAgentConfig(
     embeddingModelName: embeddingModelName || undefined,
     embeddingApiKey: embeddingApiKey || undefined,
     embeddingBaseUrl,
+    embeddingDimension,
   };
 }
 

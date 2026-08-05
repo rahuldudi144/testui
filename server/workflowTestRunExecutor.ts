@@ -1,4 +1,5 @@
 import { randomUUID } from "crypto";
+import type { Message } from "../../types/index.js";
 import { extractSqlFromMarkdown } from "./agent.js";
 import {
   buildAgentRunContext,
@@ -19,6 +20,10 @@ import type { profileAgentConfig } from "./userAgent.js";
 import { enrichQueryRunResult } from "./workflowTestObservability.js";
 import { subscribeWorkflowActivity } from "./workflowTestActivity.js";
 import { isAbortError } from "../../utils/abort.js";
+import type {
+  WorkflowExpectedOutcome,
+  WorkflowTestCategoryType,
+} from "./workflowTestCategory.js";
 
 const EMPTY_METRICS = {
   promptTokens: 0,
@@ -100,6 +105,14 @@ interface ActiveDb {
 export interface QueryItem {
   groupName: string;
   query: string;
+  categoryType?: WorkflowTestCategoryType;
+  expectedOutcome?: WorkflowExpectedOutcome;
+  /** @deprecated Prefer expectedOutcome */
+  expectedResult?: string;
+  messages?: Message[];
+  history?: "RESET" | "KEEP";
+  stopOnFailure?: boolean;
+  timeoutMs?: number;
 }
 
 export async function executeQueryItem(
@@ -122,6 +135,12 @@ export async function executeQueryItem(
       durationMs: 0,
       dryRun: context.dryRun,
       errorMessage: formatWorkflowAgentError(err),
+      categoryType: item.categoryType,
+      expectedOutcome: item.expectedOutcome,
+      expectedResult: item.expectedResult,
+      history: item.history,
+      stopOnFailure: item.stopOnFailure,
+      timeoutMs: item.timeoutMs,
     });
 
     return {
@@ -149,6 +168,7 @@ async function runQueryItem(
     abortSignal,
   } = context;
 
+  const messages = item.messages ?? [];
   const requestId = randomUUID();
   const correlationId = `workflow-${randomUUID()}`;
   beginRequestDebug(requestId, correlationId);
@@ -176,7 +196,7 @@ async function runQueryItem(
       activeDb.dbUri,
       {
         query,
-        messages: [],
+        messages,
         dryRun,
         requestId,
         correlationId,
@@ -193,7 +213,7 @@ async function runQueryItem(
     const runContext = buildAgentRunContext(
       query,
       dryRun,
-      [],
+      messages,
       agentConfig,
       output,
     );
@@ -214,6 +234,12 @@ async function runQueryItem(
       durationMs: Date.now() - startedAt,
       dryRun,
       requestId,
+      categoryType: item.categoryType,
+      expectedOutcome: item.expectedOutcome,
+      expectedResult: item.expectedResult,
+      history: item.history,
+      stopOnFailure: item.stopOnFailure,
+      timeoutMs: item.timeoutMs,
     });
   } catch (err) {
     if (isAbortError(err)) throw err;
@@ -235,6 +261,12 @@ async function runQueryItem(
       requestId,
       errorMessage: formatWorkflowAgentError(err),
       debug,
+      categoryType: item.categoryType,
+      expectedOutcome: item.expectedOutcome,
+      expectedResult: item.expectedResult,
+      history: item.history,
+      stopOnFailure: item.stopOnFailure,
+      timeoutMs: item.timeoutMs,
     });
   } finally {
     if (heartbeat) clearInterval(heartbeat);
@@ -259,20 +291,20 @@ async function persistSingleWorkflowExecution(
     userId,
     workflowTestRunId: runId,
     queryKey: result.queryKey ?? `${result.groupName}::${result.query}`,
-    attemptNumber: attempt.attemptNumber,
+    attemptNumber: attempt.attemptNumber as number,
     query: result.query,
     groupName: result.groupName,
-    status: attempt.status,
+    status: attempt.status as QueryRunResult["status"],
     metrics: {
-      promptTokens: attempt.promptTokens,
-      completionTokens: attempt.completionTokens,
-      totalTokens: attempt.totalTokens,
-      llmCallCount: attempt.llmCalls.length,
-      llmCalls: attempt.llmCalls,
+      promptTokens: attempt.promptTokens as number,
+      completionTokens: attempt.completionTokens as number,
+      totalTokens: attempt.totalTokens as number,
+      llmCallCount: (attempt.llmCalls as unknown[]).length,
+      llmCalls: attempt.llmCalls as Array<Record<string, unknown>>,
     },
-    durationMs: attempt.durationMs,
-    requestId: attempt.requestId,
-    ranAt: new Date(attempt.ranAt),
+    durationMs: attempt.durationMs as number,
+    requestId: attempt.requestId as string | undefined,
+    ranAt: new Date(attempt.ranAt as string),
   });
 }
 
@@ -311,20 +343,20 @@ export async function persistRerunExecutions(
         userId,
         workflowTestRunId: runId,
         queryKey: result.queryKey ?? `${result.groupName}::${result.query}`,
-        attemptNumber: attempt.attemptNumber,
+        attemptNumber: attempt.attemptNumber as number,
         query: result.query,
         groupName: result.groupName,
-        status: attempt.status,
+        status: attempt.status as QueryRunResult["status"],
         metrics: {
-          promptTokens: attempt.promptTokens,
-          completionTokens: attempt.completionTokens,
-          totalTokens: attempt.totalTokens,
-          llmCallCount: attempt.llmCalls.length,
-          llmCalls: attempt.llmCalls,
+          promptTokens: attempt.promptTokens as number,
+          completionTokens: attempt.completionTokens as number,
+          totalTokens: attempt.totalTokens as number,
+          llmCallCount: (attempt.llmCalls as unknown[]).length,
+          llmCalls: attempt.llmCalls as Array<Record<string, unknown>>,
         },
-        durationMs: attempt.durationMs,
-        requestId: attempt.requestId,
-        ranAt: new Date(attempt.ranAt),
+        durationMs: attempt.durationMs as number,
+        requestId: attempt.requestId as string | undefined,
+        ranAt: new Date(attempt.ranAt as string),
       });
     }
   }

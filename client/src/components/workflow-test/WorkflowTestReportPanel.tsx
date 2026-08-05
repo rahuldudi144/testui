@@ -6,6 +6,7 @@ import {
   listWorkflowTests,
   type SavedWorkflowTest,
   type WorkflowTestCompletePayload,
+  type WorkflowTestGroupRecord,
 } from "../../api";
 import { WorkflowTestReport } from "./WorkflowTestReport";
 import { Button } from "../ui/Button";
@@ -17,6 +18,12 @@ interface Props {
   refreshToken?: number;
   onError: (message: string) => void;
   onReportChange?: (report: WorkflowTestCompletePayload) => void;
+  onLoadFailuresInSetup?: (report: WorkflowTestCompletePayload) => void;
+  onFailuresImported?: (result: {
+    testId: string;
+    testName?: string;
+    groups: WorkflowTestGroupRecord[];
+  }) => void;
 }
 
 function formatRunLabel(run: {
@@ -37,6 +44,8 @@ export function WorkflowTestReportPanel({
   refreshToken,
   onError,
   onReportChange,
+  onLoadFailuresInSetup,
+  onFailuresImported,
 }: Props) {
   const [searchParams, setSearchParams] = useSearchParams();
   const [tests, setTests] = useState<SavedWorkflowTest[]>([]);
@@ -256,7 +265,17 @@ export function WorkflowTestReportPanel({
         <p className="text-sm text-muted-foreground">Loading report…</p>
       )}
 
-      {report && <WorkflowTestReport report={report} />}
+      {report && (
+        <WorkflowTestReport
+          report={report}
+          onLoadFailuresInSetup={
+            onLoadFailuresInSetup
+              ? () => onLoadFailuresInSetup(report)
+              : undefined
+          }
+          onFailuresImported={onFailuresImported}
+        />
+      )}
     </div>
   );
 }

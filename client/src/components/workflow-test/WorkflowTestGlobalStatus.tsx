@@ -1,6 +1,11 @@
 import { FlaskConical, RotateCcw, X } from "lucide-react";
-import { useWorkflowTestRunner } from "../../context/WorkflowTestRunnerContext";
+import {
+  useWorkflowTestLiveProgress,
+  useWorkflowTestRunState,
+} from "../../context/WorkflowTestRunnerContext";
 import { isResumableWorkflowRun } from "../../api";
+import { formatDurationEstimate } from "../../lib/workflowTestEta";
+import { clampProgressCounts } from "../../lib/workflowTestGroups";
 import { LiveFlaskIcon } from "./LiveFlaskIcon";
 import { WorkflowTestProgressBar } from "./WorkflowTestProgressBar";
 import { Button } from "../ui/Button";
@@ -12,30 +17,37 @@ interface Props {
 export function WorkflowTestGlobalStatus({ onOpenWorkflowTest }: Props) {
   const {
     running,
+    reconnecting,
     testName,
-    progress,
-    liveResults,
-    latestActivity,
     report,
     showCompletedBanner,
     cancel,
     rerun,
     resumeFromRun,
     dismissCompletedBanner,
-  } = useWorkflowTestRunner();
+  } = useWorkflowTestRunState();
+  const { progress, latestActivity } = useWorkflowTestLiveProgress();
 
-  if (!running && !(showCompletedBanner && report)) {
+  if (!running && !reconnecting && !(showCompletedBanner && report)) {
     return null;
   }
 
-  const completed = Math.max(progress.completedQueries, liveResults.length);
-  const inFlight = progress.queryIndex > completed;
-  const completedPct =
-    progress.totalQueries > 0
-      ? Math.round((completed / progress.totalQueries) * 100)
-      : 0;
+  const { completed, total, queryIndex, pct } = clampProgressCounts({
+    completed: progress.completedQueries,
+    total: progress.totalQueries,
+    queryIndex: progress.queryIndex,
+  });
+  const inFlight = queryIndex > completed;
+  const completedPct = pct;
   const showCompletedPct = !inFlight || completed > 0;
   const isPartialReport = report ? isResumableWorkflowRun(report) : false;
+  const statusTitle = reconnecting
+    ? "Reconnecting…"
+    : running
+      ? "Workflow test running"
+      : isPartialReport
+        ? "Workflow test stopped early"
+        : "Workflow test complete";
 
   return (
     <div
@@ -46,31 +58,28 @@ export function WorkflowTestGlobalStatus({ onOpenWorkflowTest }: Props) {
       <div className="mx-auto flex max-w-5xl flex-wrap items-center justify-between gap-3">
         <div className="min-w-0 flex-1 space-y-2">
           <div className="flex min-w-0 items-center gap-2">
-            {running ? (
+            {running || reconnecting ? (
               <LiveFlaskIcon className="shrink-0" iconClassName="text-primary" />
             ) : (
               <FlaskConical className="h-4 w-4 shrink-0 text-success" aria-hidden />
             )}
             <div className="min-w-0">
               <p className="truncate text-sm font-medium text-foreground">
-                {running
-                  ? "Workflow test running"
-                  : isPartialReport
-                    ? "Workflow test stopped early"
-                    : "Workflow test complete"}
+                {statusTitle}
                 {testName ? `: ${testName}` : ""}
               </p>
-              {running ? (
+              {running || reconnecting ? (
                 <p className="truncate text-xs text-muted-foreground">
-                  {completed} of {progress.totalQueries} completed
-                  {inFlight && progress.queryIndex > 0
-                    ? ` · query ${progress.queryIndex}`
-                    : ""}
+                  {completed} of {total} completed
+                  {inFlight && queryIndex > 0 ? ` · query ${queryIndex}` : ""}
                   {progress.groupName ? ` · ${progress.groupName}` : ""}
-                  {progress.totalQueries > 0
+                  {total > 0
                     ? showCompletedPct
                       ? ` · ${completedPct}%`
                       : " · in progress"
+                    : ""}
+                  {progress.estimatedRemainingMs !== undefined
+                    ? ` · ${formatDurationEstimate(progress.estimatedRemainingMs)} remaining`
                     : ""}
                   {latestActivity ? ` · ${latestActivity}` : ""}
                 </p>
@@ -93,12 +102,12 @@ export function WorkflowTestGlobalStatus({ onOpenWorkflowTest }: Props) {
               ) : null}
             </div>
           </div>
-          {running && progress.totalQueries > 0 && (
+          {(running || reconnecting) && total > 0 && (
             <WorkflowTestProgressBar
               size="sm"
               completedQueries={completed}
-              totalQueries={progress.totalQueries}
-              queryIndex={progress.queryIndex}
+              totalQueries={total}
+              queryIndex={queryIndex}
               className="max-w-md"
             />
           )}
@@ -106,9 +115,9 @@ export function WorkflowTestGlobalStatus({ onOpenWorkflowTest }: Props) {
 
         <div className="flex flex-wrap items-center gap-2">
           <Button type="button" size="sm" variant="secondary" onClick={onOpenWorkflowTest}>
-            {running ? "View progress" : "View report"}
+            {running || reconnecting ? "View progress" : "View report"}
           </Button>
-          {!running && report && isPartialReport && report.runId && (
+          {!running && !reconnecting && report && isPartialReport && report.runId && (
             <Button
               type="button"
               size="sm"
@@ -124,17 +133,22 @@ export function WorkflowTestGlobalStatus({ onOpenWorkflowTest }: Props) {
               Resume
             </Button>
           )}
-          {!running && report && !isPartialReport && (
+          {!running && !reconnecting && report && !isPartialReport && (
             <Button type="button" size="sm" variant="secondary" onClick={() => void rerun()}>
               <RotateCcw className="h-4 w-4" />
               Rerun
             </Button>
           )}
           {running ? (
-            <Button type="button" size="sm" variant="ghost" onClick={cancel}>
+            <Button
+              type="button"
+              size="sm"
+              variant="ghost"
+              onClick={() => void cancel()}
+            >
               Cancel
             </Button>
-          ) : (
+          ) : reconnecting ? null : (
             <Button
               type="button"
               size="icon"

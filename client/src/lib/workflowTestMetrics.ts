@@ -4,6 +4,7 @@ import type {
   WorkflowTestCompletePayload,
   WorkflowTestSummary,
 } from "../api";
+import { outcomesMatch } from "./workflowTestReportHelpers";
 
 export interface StatusBreakdown {
   passed: number;
@@ -21,6 +22,26 @@ export interface GroupOutcome {
   total: number;
 }
 
+export interface CategoryOutcome {
+  categoryType: string;
+  passed: number;
+  failed: number;
+  errors: number;
+  plannerSkipped: number;
+  total: number;
+}
+
+export interface OutcomeAlignment {
+  matched: number;
+  mismatched: number;
+  errors: number;
+}
+
+export interface ActualOutcomeCount {
+  outcome: string;
+  count: number;
+}
+
 export interface PhaseOutcome {
   phase: FailurePhase;
   count: number;
@@ -35,6 +56,10 @@ export interface QueryMetricRow {
   totalTokens: number;
   status: QueryRunResult["status"];
   executionCount: number;
+  categoryType?: string;
+  expectedOutcome?: string;
+  actualOutcome?: string;
+  outcomeMatched?: boolean;
 }
 
 export interface NodeLlmMetric {
@@ -64,7 +89,10 @@ export interface RunMetrics {
   };
   statusBreakdown: StatusBreakdown;
   byGroup: GroupOutcome[];
+  byCategory: CategoryOutcome[];
   byPhase: PhaseOutcome[];
+  outcomeAlignment: OutcomeAlignment;
+  byActualOutcome: ActualOutcomeCount[];
   perQuery: QueryMetricRow[];
   llmByNode: NodeLlmMetric[];
   attemptDistribution: AttemptDistribution[];
@@ -156,19 +184,6 @@ function aggregateAttempts(results: QueryRunResult[]): AttemptDistribution[] {
     .sort((a, b) => a.executionCount - b.executionCount);
 }
 
-function buildPerQuery(results: QueryRunResult[]): QueryMetricRow[] {
-  return results.map((result, index) => ({
-    key: queryKey(result, index),
-    label: truncateLabel(result.query),
-    groupName: result.groupName,
-    query: result.query,
-    durationMs: result.durationMs,
-    totalTokens: result.totalTokens ?? 0,
-    status: result.status,
-    executionCount: result.executionCount ?? result.attempts?.length ?? 1,
-  }));
-}
-
 function buildByGroup(summary: WorkflowTestSummary): GroupOutcome[] {
   return Object.entries(summary.byGroup).map(([groupName, group]) => ({
     groupName,
@@ -178,6 +193,80 @@ function buildByGroup(summary: WorkflowTestSummary): GroupOutcome[] {
     plannerSkipped: group.plannerSkipped,
     total: group.total,
   }));
+}
+
+function buildByCategory(
+  summary: WorkflowTestSummary,
+  results: QueryRunResult[],
+): CategoryOutcome[] {
+  if (summary.byCategory && Object.keys(summary.byCategory).length > 0) {
+    return Object.entries(summary.byCategory).map(([categoryType, group]) => ({
+      categoryType,
+      passed: group.passed,
+      failed: group.failed,
+      errors: group.errors,
+      plannerSkipped: group.plannerSkipped,
+      total: group.total,
+    }));
+  }
+
+  const map = new Map<string, CategoryOutcome>();
+  for (const result of results) {
+    const key = result.categoryType ?? "STANDARD";
+    const existing = map.get(key) ?? {
+      categoryType: key,
+      passed: 0,
+      failed: 0,
+      errors: 0,
+      plannerSkipped: 0,
+      total: 0,
+    };
+    existing.total += 1;
+    if (result.status === "pass") existing.passed += 1;
+    else if (result.status === "error") existing.errors += 1;
+    else if (result.status === "planner_skip") existing.plannerSkipped += 1;
+    else existing.failed += 1;
+    map.set(key, existing);
+  }
+  return [...map.values()];
+}
+
+function buildOutcomeAlignment(
+  summary: WorkflowTestSummary,
+  results: QueryRunResult[],
+): OutcomeAlignment {
+  if (
+    summary.outcomeMatched !== undefined ||
+    summary.outcomeMismatched !== undefined
+  ) {
+    return {
+      matched: summary.outcomeMatched ?? 0,
+      mismatched: summary.outcomeMismatched ?? 0,
+      errors: summary.errors,
+    };
+  }
+
+  let matched = 0;
+  let mismatched = 0;
+  for (const result of results) {
+    if (result.status === "error") continue;
+    const expected = result.expectedOutcome ?? result.expectedResult;
+    if (!expected) continue;
+    if (outcomesMatch(expected, result.actualOutcome)) matched += 1;
+    else mismatched += 1;
+  }
+  return { matched, mismatched, errors: summary.errors };
+}
+
+function buildByActualOutcome(results: QueryRunResult[]): ActualOutcomeCount[] {
+  const counts = new Map<string, number>();
+  for (const result of results) {
+    const key = result.actualOutcome ?? "unknown";
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+  }
+  return [...counts.entries()]
+    .map(([outcome, count]) => ({ outcome, count }))
+    .sort((a, b) => b.count - a.count);
 }
 
 function buildByPhase(summary: WorkflowTestSummary): PhaseOutcome[] {
@@ -196,13 +285,61 @@ function avgDuration(results: QueryRunResult[]): number {
   return Math.round(total / results.length);
 }
 
+function buildPerQuery(
+  results: QueryRunResult[],
+  limit?: number,
+): QueryMetricRow[] {
+  const rows = results.map((result, index) => ({
+    key: queryKey(result, index),
+    label: truncateLabel(result.query),
+    groupName: result.groupName,
+    query: result.query,
+    durationMs: result.durationMs,
+    totalTokens: result.totalTokens ?? 0,
+    status: result.status,
+    executionCount: result.executionCount ?? result.attempts?.length ?? 1,
+    categoryType: result.categoryType,
+    expectedOutcome: result.expectedOutcome ?? result.expectedResult,
+    actualOutcome: result.actualOutcome,
+    outcomeMatched: outcomesMatch(
+      result.expectedOutcome ?? result.expectedResult,
+      result.actualOutcome,
+    ),
+  }));
+
+  if (limit === 0) return [];
+  if (limit === undefined || rows.length <= limit) return rows;
+
+  // Charts only need the slowest / heaviest queries.
+  return [...rows]
+    .sort((a, b) => b.durationMs - a.durationMs)
+    .slice(0, limit);
+}
+
+export interface BuildRunMetricsOptions {
+  /** Cap per-query chart rows (sorted by duration). Omit for full list (compare). */
+  perQueryLimit?: number;
+  /** Skip expensive LLM/attempt walks — enough for overview cards. */
+  lightweight?: boolean;
+}
+
+/** Overview-only metrics from summary; avoids scanning attempts/LLM calls. */
+export function buildLightweightRunMetrics(
+  report: WorkflowTestCompletePayload,
+): RunMetrics {
+  return buildRunMetrics(report, { lightweight: true, perQueryLimit: 0 });
+}
+
 export function buildRunMetrics(
   report: WorkflowTestCompletePayload,
+  options?: BuildRunMetricsOptions,
 ): RunMetrics {
   const { summary, results } = report;
   const totalQueries = summary.total || results.length;
   const passRate =
     totalQueries > 0 ? Math.round((summary.passed / totalQueries) * 100) : 0;
+  const lightweight = options?.lightweight === true;
+  const perQueryLimit = options?.perQueryLimit;
 
   return {
     overview: {
@@ -221,10 +358,15 @@ export function buildRunMetrics(
       plannerSkipped: summary.plannerSkipped,
     },
     byGroup: buildByGroup(summary),
+    byCategory: buildByCategory(summary, results),
     byPhase: buildByPhase(summary),
-    perQuery: buildPerQuery(results),
-    llmByNode: aggregateLlmByNode(results),
-    attemptDistribution: aggregateAttempts(results),
+    outcomeAlignment: buildOutcomeAlignment(summary, results),
+    byActualOutcome: lightweight ? [] : buildByActualOutcome(results),
+    perQuery: lightweight
+      ? []
+      : buildPerQuery(results, perQueryLimit),
+    llmByNode: lightweight ? [] : aggregateLlmByNode(results),
+    attemptDistribution: lightweight ? [] : aggregateAttempts(results),
   };
 }
 
@@ -268,8 +410,7 @@ export function buildCompareMetrics(
       passRateDelta: b.overview.passRate - a.overview.passRate,
       totalTokensDelta: b.overview.totalTokens - a.overview.totalTokens,
       avgDurationMsDelta: b.overview.avgDurationMs - a.overview.avgDurationMs,
-      errorCountDelta:
-        b.statusBreakdown.errors - a.statusBreakdown.errors,
+      errorCountDelta: b.statusBreakdown.errors - a.statusBreakdown.errors,
     },
     perQueryOverlap,
   };

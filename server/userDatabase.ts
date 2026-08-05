@@ -127,6 +127,42 @@ export async function getActiveDatabaseForUser(userId: string) {
   return user.activeDatabase;
 }
 
+/**
+ * Resolve DB for a workflow test run:
+ * request override → pinned on test → active database.
+ */
+export async function resolveDatabaseForWorkflowTest(
+  userId: string,
+  options?: {
+    databaseConnectionId?: string | null;
+    testDatabaseConnectionId?: string | null;
+  },
+) {
+  const requested = options?.databaseConnectionId?.trim();
+  if (requested) {
+    const connection = await prisma.databaseConnection.findFirst({
+      where: { id: requested, userId },
+    });
+    if (!connection) {
+      throw new Error("Database connection not found.");
+    }
+    return connection;
+  }
+
+  const pinned = options?.testDatabaseConnectionId?.trim();
+  if (pinned) {
+    const connection = await prisma.databaseConnection.findFirst({
+      where: { id: pinned, userId },
+    });
+    if (!connection) {
+      throw new Error("Pinned database connection was not found.");
+    }
+    return connection;
+  }
+
+  return getActiveDatabaseForUser(userId);
+}
+
 export async function setActiveDatabase(userId: string, databaseId: string) {
   const connection = await prisma.databaseConnection.findFirst({
     where: { id: databaseId, userId },

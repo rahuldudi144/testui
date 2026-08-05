@@ -4,7 +4,10 @@ import { Play, RotateCcw } from "lucide-react";
 import {
   getWorkflowTest,
   listAgents,
+  listDatabases,
+  updateWorkflowTestFailuresPolicy,
   type UserAgent,
+  type UserDatabase,
   type WorkflowTestCompletePayload,
   type WorkflowTestGroupRecord,
 } from "../api";
@@ -13,10 +16,18 @@ import {
   type WorkflowTestRunConfig,
 } from "../context/WorkflowTestRunnerContext";
 import {
+  countQueriesInGroups,
   toApiGroups,
   type StressTestGroupInput,
 } from "../lib/parseQueryGroups";
-import { groupsToFormInput, getFailuresGroup } from "../lib/workflowTestGroups";
+import {
+  clampProgressCounts,
+  failureResultsToFormGroups,
+  getFailuresGroup,
+  groupsToFormInput,
+  isEphemeralFailuresGroup,
+  resolveFailuresRunAction,
+} from "../lib/workflowTestGroups";
 import type { ParsedWorkflowTestImport } from "../lib/parseWorkflowTestJson";
 import { PageHeader } from "./layout/PageHeader";
 import { WorkflowTestForm } from "./workflow-test/WorkflowTestForm";
@@ -50,10 +61,13 @@ export function WorkflowTestPage({ onBack, dbConfigured, onOpenSettings }: Props
     report,
     error: runnerError,
     savedRefreshToken,
+    setupGroupsRefreshToken,
     lastConfig,
     testName: runnerTestName,
     run,
+    runGroup,
     rerun,
+    rerunFailuresInReport,
     cancel,
     clearError,
     setReport,
@@ -62,6 +76,9 @@ export function WorkflowTestPage({ onBack, dbConfigured, onOpenSettings }: Props
   } = useWorkflowTestRunner();
 
   const [savedTestCount, setSavedTestCount] = useState(0);
+  const [savedRunCount, setSavedRunCount] = useState(0);
+  const [loadedTestId, setLoadedTestId] = useState<string | null>(null);
+  const [linkedRunId, setLinkedRunId] = useState<string | null>(null);
   const [testName, setTestName] = useState("");
   const [groups, setGroups] = useState<StressTestGroupInput[]>([
     { name: "", queriesText: "" },
@@ -70,11 +87,18 @@ export function WorkflowTestPage({ onBack, dbConfigured, onOpenSettings }: Props
   const [delayMs, setDelayMs] = useState(0);
   const [agentProfileId, setAgentProfileId] = useState<string | null>(null);
   const [agents, setAgents] = useState<UserAgent[]>([]);
+  const [databaseConnectionId, setDatabaseConnectionId] = useState<string | null>(
+    null,
+  );
+  const [databases, setDatabases] = useState<UserDatabase[]>([]);
   const [failuresGroup, setFailuresGroup] = useState<WorkflowTestGroupRecord | null>(
     null,
   );
+  /** Setup groups came from Load failures in setup — Run writes back to linked report. */
+  const [sameReportFailureMode, setSameReportFailureMode] = useState(false);
   const [localError, setLocalError] = useState<string | null>(null);
 
+  const totalQueries = countQueriesInGroups(groups);
   const error = localError ?? runnerError;
 
   const tabFromPath = useMemo((): WorkflowTab => {
@@ -102,10 +126,18 @@ export function WorkflowTestPage({ onBack, dbConfigured, onOpenSettings }: Props
 
   const syncFormFromConfig = useCallback((config: WorkflowTestRunConfig) => {
     setTestName(config.testName);
-    setGroups(groupsToFormInput(config.groups));
+    setGroups(
+      config.groups.map((group) => ({
+        name: group.name,
+        queriesText: group.queries.join("\n"),
+        categoryType: group.categoryType,
+        execution: group.execution,
+      })),
+    );
     setDryRun(config.dryRun);
     setDelayMs(config.delayMs);
     setAgentProfileId(config.agentProfileId ?? null);
+    setDatabaseConnectionId(config.databaseConnectionId ?? null);
   }, []);
 
   useEffect(() => {
@@ -115,26 +147,16 @@ export function WorkflowTestPage({ onBack, dbConfigured, onOpenSettings }: Props
   }, [savedRefreshToken]);
 
   useEffect(() => {
+    void listDatabases()
+      .then((data) => setDatabases(data.databases))
+      .catch(() => setDatabases([]));
+  }, [savedRefreshToken]);
+
+  useEffect(() => {
     if (lastConfig) {
       syncFormFromConfig(lastConfig);
     }
   }, [lastConfig, syncFormFromConfig]);
-
-  useEffect(() => {
-    const testId = report?.testId;
-    if (!testId) return;
-    let cancelled = false;
-    void getWorkflowTest(testId)
-      .then((test) => {
-        if (!cancelled) {
-          setFailuresGroup(getFailuresGroup(test.groups) ?? null);
-        }
-      })
-      .catch(() => undefined);
-    return () => {
-      cancelled = true;
-    };
-  }, [report?.testId, savedRefreshToken]);
 
   useEffect(() => {
     if (!showCompletedBanner || !report) return;
@@ -157,6 +179,7 @@ export function WorkflowTestPage({ onBack, dbConfigured, onOpenSettings }: Props
         testName: trimmedName,
         groups: apiGroups,
         agentProfileId,
+        databaseConnectionId,
         dryRun,
         delayMs,
       };
@@ -180,6 +203,10 @@ export function WorkflowTestPage({ onBack, dbConfigured, onOpenSettings }: Props
       setLocalError("Add at least one group with a name and queries.");
       return;
     }
+    if (totalQueries === 0) {
+      setLocalError("Add at least one query before running.");
+      return;
+    }
     if (!dbConfigured) {
       setLocalError("Configure a database connection before running workflow tests.");
       return;
@@ -193,12 +220,33 @@ export function WorkflowTestPage({ onBack, dbConfigured, onOpenSettings }: Props
     setLocalError(null);
     clearError();
 
+    if (sameReportFailureMode && linkedRunId) {
+      await rerunFailuresInReport(linkedRunId, {
+        testName: config.testName,
+        dryRun: config.dryRun,
+        delayMs: config.delayMs,
+        agentProfileId: config.agentProfileId,
+        groups: config.groups,
+      });
+      return;
+    }
+
     await run(config);
   }
 
   async function handleRerun() {
     const config = resolveRunConfig();
-    if (config && config.testName.trim() && config.groups.length > 0) {
+    if (
+      config &&
+      config.testName.trim() &&
+      config.groups.length > 0 &&
+      countQueriesInGroups(
+        config.groups.map((group) => ({
+          name: group.name,
+          queriesText: group.queries.join("\n"),
+        })),
+      ) > 0
+    ) {
       await run(config);
       return;
     }
@@ -213,27 +261,40 @@ export function WorkflowTestPage({ onBack, dbConfigured, onOpenSettings }: Props
     setTestName(data.testName);
     setGroups(data.groups);
     setFailuresGroup(null);
+    setLoadedTestId(null);
+    setLinkedRunId(null);
+    setSameReportFailureMode(false);
     if (data.dryRun !== undefined) setDryRun(data.dryRun);
     if (data.delayMs !== undefined) setDelayMs(data.delayMs);
+    if (data.databaseConnectionId !== undefined) {
+      setDatabaseConnectionId(data.databaseConnectionId);
+    }
     setLocalError(null);
     clearError();
     setTab("setup");
   }
 
   function handleLoadSavedTest(data: {
+    testId: string;
+    linkedRunId: string | null;
     testName: string;
     groups: StressTestGroupInput[];
     failuresGroup: WorkflowTestGroupRecord | null;
     dryRun: boolean;
     delayMs: number;
     agentProfileId?: string | null;
+    databaseConnectionId?: string | null;
   }) {
+    setLoadedTestId(data.testId);
+    setLinkedRunId(data.linkedRunId);
+    setSameReportFailureMode(false);
     setTestName(data.testName);
     setGroups(data.groups);
     setFailuresGroup(data.failuresGroup);
     setDryRun(data.dryRun);
     setDelayMs(data.delayMs);
     setAgentProfileId(data.agentProfileId ?? null);
+    setDatabaseConnectionId(data.databaseConnectionId ?? null);
     setLocalError(null);
     clearError();
     setTab("setup");
@@ -241,10 +302,160 @@ export function WorkflowTestPage({ onBack, dbConfigured, onOpenSettings }: Props
 
   function handleLoadSavedReport(payload: WorkflowTestCompletePayload) {
     setReport(payload);
+    setLoadedTestId(payload.testId ?? null);
+    setLinkedRunId(payload.runId ?? null);
+    setSameReportFailureMode(false);
     navigate("/tests/report");
     setLocalError(null);
     clearError();
   }
+
+  function handleLoadFailuresInSetup(payload: WorkflowTestCompletePayload) {
+    const formGroups = failureResultsToFormGroups(payload.results);
+    if (formGroups.length === 0) {
+      setLocalError("No failed or error queries to load into Setup.");
+      return;
+    }
+
+    setReport(payload);
+    setLoadedTestId(payload.testId ?? null);
+    setLinkedRunId(payload.runId ?? null);
+    setSameReportFailureMode(true);
+    setTestName(payload.testName || testName);
+    setGroups(formGroups);
+    setFailuresGroup(null);
+    if (typeof payload.dryRun === "boolean") setDryRun(payload.dryRun);
+    if (typeof payload.delayMs === "number") setDelayMs(payload.delayMs);
+    if (payload.agent?.id) setAgentProfileId(payload.agent.id);
+    setLocalError(null);
+    clearError();
+    setTab("setup");
+  }
+
+  useEffect(() => {
+    // Don't overwrite Setup groups loaded from a report's failures.
+    if (sameReportFailureMode) return;
+    const testId = loadedTestId ?? report?.testId ?? null;
+    if (!testId || setupGroupsRefreshToken === 0) return;
+    let cancelled = false;
+    void getWorkflowTest(testId)
+      .then((test) => {
+        if (cancelled) return;
+        setLoadedTestId((prev) => prev ?? testId);
+        setGroups(groupsToFormInput(test.groups));
+        setFailuresGroup(getFailuresGroup(test.groups) ?? null);
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [setupGroupsRefreshToken, loadedTestId, report?.testId, sameReportFailureMode]);
+
+  useEffect(() => {
+    const testId = report?.testId;
+    if (!testId) return;
+    if (sameReportFailureMode) return;
+    if (loadedTestId && loadedTestId !== testId) return;
+    let cancelled = false;
+    void getWorkflowTest(testId)
+      .then((test) => {
+        if (cancelled) return;
+        setLoadedTestId((prev) => prev ?? testId);
+        setGroups(groupsToFormInput(test.groups));
+        setFailuresGroup(getFailuresGroup(test.groups) ?? null);
+        if (test.name) setTestName(test.name);
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [report?.testId, savedRefreshToken, loadedTestId, sameReportFailureMode]);
+
+  function applyImportedGroups(
+    testId: string,
+    importedGroups: WorkflowTestGroupRecord[],
+    options?: { switchToSetup?: boolean; testName?: string },
+  ) {
+    // Always point Setup at the target test (new failures suite), not the parent.
+    setLoadedTestId(testId);
+    setLinkedRunId(null);
+    setGroups(groupsToFormInput(importedGroups));
+    setFailuresGroup(getFailuresGroup(importedGroups) ?? null);
+    if (options?.testName) setTestName(options.testName);
+    if (options?.switchToSetup) setTab("setup");
+    void getWorkflowTest(testId)
+      .then((test) => {
+        setTestName(test.name);
+        setGroups(groupsToFormInput(test.groups));
+        setFailuresGroup(getFailuresGroup(test.groups) ?? null);
+        setAgentProfileId(test.agentProfileId);
+        setDatabaseConnectionId(test.databaseConnectionId ?? null);
+        setDryRun(test.dryRun);
+        setDelayMs(test.delayMs);
+      })
+      .catch(() => undefined);
+  }
+
+  function handleFailuresGroupChange(next: WorkflowTestGroupRecord | null) {
+    setFailuresGroup(next);
+    const testId = loadedTestId ?? report?.testId ?? null;
+    if (!testId || !next || isEphemeralFailuresGroup(next)) return;
+    void updateWorkflowTestFailuresPolicy(testId, {
+      categoryType: next.categoryType,
+      executionOverrides: next.executionOverrides ?? null,
+    }).catch(() => undefined);
+  }
+
+  async function handleRunFailuresFromSetup() {
+    const action = resolveFailuresRunAction({
+      linkedRunId,
+      loadedTestId,
+      failuresGroupId: failuresGroup?.id,
+    });
+    if (!action) {
+      setLocalError("Load a saved test (or report) before running failures.");
+      return;
+    }
+    const options = {
+      testName: testName.trim() || "Workflow test",
+      dryRun,
+      delayMs,
+      ...(failuresGroup
+        ? {
+            categoryType: failuresGroup.categoryType,
+            execution: failuresGroup.executionOverrides ?? null,
+          }
+        : {}),
+    };
+
+    const persistTestId = loadedTestId ?? report?.testId ?? null;
+    if (
+      persistTestId &&
+      failuresGroup &&
+      !isEphemeralFailuresGroup(failuresGroup)
+    ) {
+      try {
+        await updateWorkflowTestFailuresPolicy(persistTestId, {
+          categoryType: failuresGroup.categoryType,
+          executionOverrides: failuresGroup.executionOverrides ?? null,
+        });
+      } catch {
+        // Run anyway with request-body overrides on rerun path.
+      }
+    }
+
+    if (action.type === "rerun-report") {
+      await rerunFailuresInReport(action.runId, options);
+      return;
+    }
+    await runGroup(action.testId, action.groupId, options);
+  }
+
+  const progressCounts = clampProgressCounts({
+    completed: progress.completedQueries,
+    total: progress.totalQueries,
+    queryIndex: progress.queryIndex,
+  });
 
   return (
     <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-6 md:px-8 md:py-8">
@@ -274,7 +485,7 @@ export function WorkflowTestPage({ onBack, dbConfigured, onOpenSettings }: Props
                 type="button"
                 onClick={() => void handleRun()}
                 loading={running}
-                disabled={running || !agentProfileId}
+                disabled={running || !agentProfileId || totalQueries === 0}
               >
                 <Play className="h-4 w-4" />
                 Run workflow test
@@ -316,9 +527,12 @@ export function WorkflowTestPage({ onBack, dbConfigured, onOpenSettings }: Props
               testName={runnerTestName || testName || progress.groupName}
               groupName={progress.groupName}
               query={progress.query}
-              queryIndex={progress.queryIndex}
-              totalQueries={progress.totalQueries}
-              completedQueries={Math.max(progress.completedQueries, liveResults.length)}
+              queryIndex={progressCounts.queryIndex}
+              totalQueries={progressCounts.total}
+              completedQueries={progressCounts.completed}
+              estimatedRemainingMs={progress.estimatedRemainingMs}
+              categoryType={progress.categoryType}
+              expectedOutcome={progress.expectedOutcome}
               latestActivity={latestActivity}
               activityLog={activityLog}
               liveResults={liveResults}
@@ -329,7 +543,8 @@ export function WorkflowTestPage({ onBack, dbConfigured, onOpenSettings }: Props
 
         {!running && liveResults.length > 0 && !report && (
           <Alert variant="info" className="mb-4">
-            {liveResults.length} result(s) collected before the run ended.
+            {progress.completedQueries || liveResults.length} result(s) collected
+            before the run ended.
           </Alert>
         )}
 
@@ -343,7 +558,7 @@ export function WorkflowTestPage({ onBack, dbConfigured, onOpenSettings }: Props
             </TabsTrigger>
             <TabsTrigger value="setup">Setup</TabsTrigger>
             <TabsTrigger value="report">
-              Report{report ? ` (${report.results.length})` : ""}
+              Report{savedRunCount > 0 ? ` (${savedRunCount})` : ""}
             </TabsTrigger>
             <TabsTrigger value="compare">Compare</TabsTrigger>
             <TabsTrigger value="usage">Usage</TabsTrigger>
@@ -356,7 +571,10 @@ export function WorkflowTestPage({ onBack, dbConfigured, onOpenSettings }: Props
               onLoadTest={handleLoadSavedTest}
               onLoadReport={handleLoadSavedReport}
               onError={setLocalError}
-              onTestsLoaded={setSavedTestCount}
+              onTestsLoaded={({ testCount, runCount }) => {
+                setSavedTestCount(testCount);
+                setSavedRunCount(runCount);
+              }}
             />
           </TabsContent>
 
@@ -375,11 +593,16 @@ export function WorkflowTestPage({ onBack, dbConfigured, onOpenSettings }: Props
                 agents={agents}
                 agentProfileId={agentProfileId}
                 onAgentProfileIdChange={setAgentProfileId}
+                databases={databases}
+                databaseConnectionId={databaseConnectionId}
+                onDatabaseConnectionIdChange={setDatabaseConnectionId}
                 dryRun={dryRun}
                 onDryRunChange={setDryRun}
                 delayMs={delayMs}
                 onDelayMsChange={setDelayMs}
                 failuresGroup={failuresGroup}
+                onFailuresGroupChange={handleFailuresGroupChange}
+                onRunFailures={() => void handleRunFailuresFromSetup()}
                 disabled={running}
               />
             </div>
@@ -391,6 +614,11 @@ export function WorkflowTestPage({ onBack, dbConfigured, onOpenSettings }: Props
               refreshToken={savedRefreshToken}
               onError={setLocalError}
               onReportChange={setReport}
+              onLoadFailuresInSetup={handleLoadFailuresInSetup}
+              onFailuresImported={() => {
+                // Stay out of Setup — just surface the new test under Tests.
+                setTab("tests");
+              }}
             />
           </TabsContent>
 

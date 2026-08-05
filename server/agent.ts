@@ -23,6 +23,7 @@ export interface AgentConfigOverrides {
   embeddingModelName?: string;
   embeddingApiKey?: string;
   embeddingBaseUrl?: string;
+  embeddingDimension?: number;
 }
 
 /**
@@ -60,6 +61,9 @@ export function buildConfig(
       : env.DB_AGENT_EMBEDDING_BASE_URL?.trim() || undefined) ||
     undefined;
 
+  const embeddingDimension =
+    options?.embeddingDimension ?? env.DB_AGENT_EMBEDDING_DIMENSION;
+
   return {
     llmProvider: provider,
     modelName: options?.modelName ?? env.DB_AGENT_MODEL_NAME,
@@ -72,6 +76,7 @@ export function buildConfig(
     ...(embeddingModelName ? { embeddingModelName } : {}),
     ...(embeddingApiKey ? { embeddingApiKey } : {}),
     ...(embeddingBaseUrl ? { embeddingBaseUrl } : {}),
+    ...(embeddingDimension !== undefined ? { embeddingDimension } : {}),
     dbType,
     readOnly: env.DB_AGENT_READ_ONLY,
     maxValidationRetries: env.DB_AGENT_MAX_VALIDATION_RETRIES,

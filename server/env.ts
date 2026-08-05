@@ -52,6 +52,8 @@ const envSchema = z
     DB_AGENT_EMBEDDING_API_KEY: z.string().optional(),
     /** Required when DB_AGENT_EMBEDDING_PROVIDER=local (OpenAI-compatible host). */
     DB_AGENT_EMBEDDING_BASE_URL: z.string().optional(),
+    /** Optional pgvector / embedding size override (else derived from model). */
+    DB_AGENT_EMBEDDING_DIMENSION: z.coerce.number().int().positive().optional(),
     /** Custom base URL for OpenAI-compatible / Anthropic / Gemini adapters. */
     DB_AGENT_BASE_URL: z.string().optional(),
     DB_AGENT_OLLAMA_BASE_URL: z.string().optional(),

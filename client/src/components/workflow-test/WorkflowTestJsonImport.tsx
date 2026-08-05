@@ -39,8 +39,11 @@ export function WorkflowTestJsonImport({ disabled, onImport, onError }: Props) {
     }
 
     onImport(result.data);
+    const queryCount = countQueriesInGroups(result.data.groups);
+    const skeletonNote =
+      queryCount === 0 ? " — add queries before running." : ".";
     setImportMessage(
-      `Loaded "${result.data.testName}" with ${result.data.groups.length} group(s) and ${countQueriesInGroups(result.data.groups)} queries.`,
+      `Loaded "${result.data.testName}" with ${result.data.groups.length} group(s) and ${queryCount} queries${skeletonNote}`,
     );
   }
 
@@ -56,7 +59,12 @@ export function WorkflowTestJsonImport({ disabled, onImport, onError }: Props) {
           <p className="text-sm font-medium text-foreground">Import from JSON</p>
           <p className="mt-1 text-xs text-muted-foreground">
             Paste JSON below or upload a file to fill the test name, groups, and
-            queries. Optional{" "}
+            queries. Empty{" "}
+            <code className="rounded bg-muted px-1 py-0.5 font-mono text-[11px]">
+              queries
+            </code>{" "}
+            arrays are allowed for scaffolding — add queries before running.
+            Optional{" "}
             <code className="rounded bg-muted px-1 py-0.5 font-mono text-[11px]">
               dryRun
             </code>{" "}

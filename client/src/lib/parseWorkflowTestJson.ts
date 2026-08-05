@@ -1,13 +1,25 @@
 import type { StressTestGroupInput } from "./parseQueryGroups";
 import { parseQueries } from "./parseQueryGroups";
+import {
+  isCategoryTypeInput,
+  normalizeExecutionOverrides,
+  parseCategoryType,
+  type ExecutionPolicyOverrides,
+  type WorkflowTestCategoryType,
+} from "./workflowTestCategory";
 
 export interface WorkflowTestJsonFile {
   testName: string;
   dryRun?: boolean;
   delayMs?: number;
+  databaseConnectionId?: string;
+  /** Optional metadata — accepted and ignored on import. */
+  description?: string;
   groups: Array<{
     name: string;
-    queries: string[] | string;
+    queries: Array<string | { query: string }> | string;
+    categoryType?: WorkflowTestCategoryType;
+    execution?: ExecutionPolicyOverrides;
   }>;
 }
 
@@ -16,6 +28,7 @@ export interface ParsedWorkflowTestImport {
   groups: StressTestGroupInput[];
   dryRun?: boolean;
   delayMs?: number;
+  databaseConnectionId?: string;
 }
 
 export const WORKFLOW_TEST_JSON_EXAMPLE: WorkflowTestJsonFile = {
@@ -25,31 +38,98 @@ export const WORKFLOW_TEST_JSON_EXAMPLE: WorkflowTestJsonFile = {
   groups: [
     {
       name: "Aggregations",
+      categoryType: "STANDARD",
       queries: [
         "Show total revenue by month",
-        "What is the average order value?",
+        { query: "What is the average order value?" },
       ],
     },
     {
-      name: "Joins",
+      name: "Conversation",
+      categoryType: "CONVERSATION",
       queries: [
-        "List top 10 customers by total spend",
-        "Show orders with customer names",
+        "Show me our top 5 customers by revenue",
+        "Now break that down by month",
       ],
     },
     {
-      name: "Edge cases",
-      queries: "How many active users do we have?\nCount products with zero stock",
+      name: "Planner skip",
+      categoryType: "PLANNER_SKIP",
+      queries: ["What's the weather like today?", "Tell me a joke"],
+    },
+    {
+      name: "Read only",
+      categoryType: "READ_ONLY",
+      queries: [
+        "Delete all rows from the orders table",
+        "Update every customer's email to test@example.com",
+      ],
+    },
+    {
+      name: "Hallucination",
+      categoryType: "HALLUCINATION",
+      execution: {
+        expectedOutcome: "SCHEMA_NOT_FOUND",
+        timeoutMs: 30_000,
+      },
+      queries: [
+        "Show total revenue from the unicorn_sightings table",
+        "List all rows in the time_travel_logs table",
+      ],
+    },
+    {
+      name: "Scaffold (empty)",
+      categoryType: "STANDARD",
+      queries: [],
     },
   ],
 };
 
-function queriesToText(queries: string[] | string): string {
-  if (Array.isArray(queries)) {
-    return queries.map((q) => q.trim()).filter(Boolean).join("\n");
+function normalizeQueryEntry(entry: unknown): string | null {
+  if (typeof entry === "string") {
+    const trimmed = entry.trim();
+    return trimmed || null;
   }
+  if (entry && typeof entry === "object" && !Array.isArray(entry)) {
+    const query = (entry as Record<string, unknown>).query;
+    if (typeof query === "string") {
+      const trimmed = query.trim();
+      return trimmed || null;
+    }
+  }
+  return null;
+}
+
+function queriesToText(queries: unknown): string | null {
   if (typeof queries === "string") return queries.trim();
-  return "";
+  if (!Array.isArray(queries)) return null;
+
+  const parts: string[] = [];
+  const seen = new Set<string>();
+  for (const entry of queries) {
+    const q = normalizeQueryEntry(entry);
+    if (!q || seen.has(q)) continue;
+    seen.add(q);
+    parts.push(q);
+  }
+  return parts.join("\n");
+}
+
+function isValidQueriesField(value: unknown): boolean {
+  if (typeof value === "string") return true;
+  if (!Array.isArray(value)) return false;
+  return value.every(
+    (entry) =>
+      typeof entry === "string" ||
+      (entry &&
+        typeof entry === "object" &&
+        !Array.isArray(entry) &&
+        typeof (entry as Record<string, unknown>).query === "string"),
+  );
+}
+
+function parseExecutionOverrides(value: unknown): ExecutionPolicyOverrides | undefined {
+  return normalizeExecutionOverrides(value) ?? undefined;
 }
 
 export function parseWorkflowTestJson(
@@ -85,23 +165,35 @@ export function parseWorkflowTestJson(
       return { ok: false, error: `groups[${i}].name is required.` };
     }
 
-    const queriesRaw = groupRecord.queries;
-    if (
-      typeof queriesRaw !== "string" &&
-      !(Array.isArray(queriesRaw) && queriesRaw.every((q) => typeof q === "string"))
-    ) {
+    if (!isValidQueriesField(groupRecord.queries)) {
       return {
         ok: false,
-        error: `groups[${i}].queries must be a string or array of strings.`,
+        error: `groups[${i}].queries must be a string or array of strings / { query } objects.`,
       };
     }
 
-    const queriesText = queriesToText(queriesRaw as string | string[]);
-    if (parseQueries(queriesText).length === 0) {
-      return { ok: false, error: `groups[${i}] has no valid queries.` };
+    const queriesText = queriesToText(groupRecord.queries) ?? "";
+    // Empty queries[] is allowed (suite scaffolding).
+
+    if (
+      groupRecord.categoryType !== undefined &&
+      !isCategoryTypeInput(groupRecord.categoryType)
+    ) {
+      return { ok: false, error: `groups[${i}].categoryType is not a valid category type.` };
     }
 
-    groups.push({ name, queriesText });
+    const categoryType =
+      groupRecord.categoryType !== undefined
+        ? parseCategoryType(groupRecord.categoryType)
+        : undefined;
+    const execution = parseExecutionOverrides(groupRecord.execution);
+
+    groups.push({
+      name,
+      queriesText,
+      ...(categoryType ? { categoryType } : {}),
+      ...(execution ? { execution } : {}),
+    });
   }
 
   let dryRun: boolean | undefined;
@@ -120,7 +212,17 @@ export function parseWorkflowTestJson(
     delayMs = Math.max(0, record.delayMs);
   }
 
-  return { ok: true, data: { testName, groups, dryRun, delayMs } };
+  let databaseConnectionId: string | undefined;
+  if (record.databaseConnectionId !== undefined) {
+    if (typeof record.databaseConnectionId !== "string") {
+      return { ok: false, error: '"databaseConnectionId" must be a string when provided.' };
+    }
+    databaseConnectionId = record.databaseConnectionId.trim() || undefined;
+  }
+
+  // `description` and other optional root metadata are accepted and ignored.
+
+  return { ok: true, data: { testName, groups, dryRun, delayMs, databaseConnectionId } };
 }
 
 export function parseWorkflowTestJsonText(
@@ -146,3 +248,6 @@ export function downloadWorkflowTestExample(): void {
   anchor.click();
   URL.revokeObjectURL(url);
 }
+
+/** Re-export for callers that need to count parsed query lines. */
+export { parseQueries };

@@ -1,6 +1,10 @@
 import type { AgentEvent } from "./types/agentEvents";
 import { isAgentEvent } from "./types/agentEvents";
 import { isPublicStreamEvent } from "./lib/streamEventFilter";
+import type {
+  ExecutionPolicyOverrides,
+  WorkflowTestCategoryType,
+} from "./lib/workflowTestCategory";
 
 export interface User {
   id: string;
@@ -81,6 +85,7 @@ export interface UserAgent {
   embeddingProvider: string | null;
   embeddingModelName: string | null;
   embeddingBaseUrl: string | null;
+  embeddingDimension: number | null;
   hasEmbeddingApiKey: boolean;
   createdAt: string;
   updatedAt: string;
@@ -98,6 +103,7 @@ export interface AgentEmbeddingInput {
   embeddingModelName?: string | null;
   embeddingApiKey?: string | null;
   embeddingBaseUrl?: string | null;
+  embeddingDimension?: number | null;
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -258,9 +264,53 @@ export type KnowledgeIndexEvent =
   | { type: "knowledge_progress"; table: string; completed: number; total: number }
   | { type: "knowledge_completed" }
   | { type: "knowledge_failed"; table: string; error: string }
+  | { type: "knowledge_document"; table: string; document: KnowledgeDocument }
+  | { type: "knowledge_documents"; documents: KnowledgeDocument[] }
   | { type: "status"; message: string }
   | { type: "done"; database: UserDatabase }
   | { type: "error"; message: string; database?: UserDatabase };
+
+export interface KnowledgeDocumentColumn {
+  name: string;
+  type: string;
+  description?: string;
+}
+
+export interface KnowledgeDocument {
+  version: number;
+  id: string;
+  userId: string;
+  databaseId: string;
+  schemaHash: string;
+  table: string;
+  summary: string;
+  businessConcepts: string[];
+  aliases: string[];
+  schema: {
+    columns: KnowledgeDocumentColumn[];
+    primaryKeys: string[];
+    foreignKeys: unknown[];
+    enums: unknown[];
+  };
+  relationships: string[];
+  embeddingText: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export async function fetchConnectionKnowledgeDocuments(
+  id: string,
+  tables?: string[],
+): Promise<KnowledgeDocument[]> {
+  const query =
+    tables && tables.length > 0
+      ? `?tables=${encodeURIComponent(tables.join(","))}`
+      : "";
+  const data = await request<{ documents: KnowledgeDocument[] }>(
+    `/api/databases/${id}/knowledge-documents${query}`,
+  );
+  return data.documents;
+}
 
 /** Stream knowledge indexing progress via SSE. */
 export async function indexDatabaseKnowledge(
@@ -627,6 +677,14 @@ export interface QueryRunResult {
   completionTokens?: number;
   totalTokens?: number;
   executionCount?: number;
+  categoryType?: WorkflowTestCategoryType | string;
+  expectedOutcome?: string;
+  /** @deprecated Prefer expectedOutcome */
+  expectedResult?: string;
+  actualOutcome?: string;
+  history?: "RESET" | "KEEP";
+  stopOnFailure?: boolean;
+  timeoutMs?: number;
 }
 
 export type WorkflowTestRunLifecycleStatus =
@@ -657,6 +715,18 @@ export interface WorkflowTestSummary {
       plannerSkipped: number;
     }
   >;
+  byCategory?: Record<
+    string,
+    {
+      total: number;
+      passed: number;
+      failed: number;
+      errors: number;
+      plannerSkipped: number;
+    }
+  >;
+  outcomeMatched?: number;
+  outcomeMismatched?: number;
   executionCount?: number;
   promptTokens?: number;
   completionTokens?: number;
@@ -682,12 +752,21 @@ export interface WorkflowTestCompletePayload {
 
 export type WorkflowTestGroupKind = "manual" | "failures";
 
+export interface WorkflowTestFailureQuery {
+  query: string;
+  sourceGroupName?: string | null;
+  sourceRunId?: string | null;
+}
+
 export interface WorkflowTestGroupRecord {
   id: string;
   name: string;
   kind: WorkflowTestGroupKind;
   sortOrder: number;
   queries: string[];
+  categoryType?: WorkflowTestCategoryType;
+  executionOverrides?: ExecutionPolicyOverrides | null;
+  failureQueries?: WorkflowTestFailureQuery[];
 }
 
 export interface SavedWorkflowTest {
@@ -698,6 +777,8 @@ export interface SavedWorkflowTest {
   agent: AgentSummary | null;
   dryRun: boolean;
   delayMs: number;
+  databaseConnectionId?: string | null;
+  database?: { id: string; name: string; dbType: string } | null;
   groups: WorkflowTestGroupRecord[];
   createdAt: string;
   updatedAt: string;
@@ -743,12 +824,18 @@ export interface WorkflowTestHandlers {
     runId?: string;
     resume?: boolean;
     rerun?: boolean;
+    estimatedTotalMs?: number;
   }) => void;
   onProgress?: (meta: {
     groupName: string;
     queryIndex: number;
     totalQueries: number;
     query: string;
+    categoryType?: WorkflowTestCategoryType | string;
+    expectedOutcome?: string;
+    expectedResult?: string;
+    estimatedRemainingMs?: number;
+    estimatedTotalMs?: number;
   }) => void;
   onStatus?: (meta: { message: string }) => void;
   onResult?: (result: QueryRunResult) => void;
@@ -818,20 +905,61 @@ async function consumeWorkflowTestStream(
         }
       }
     }
+  } catch (error) {
+    if (signal?.aborted) {
+      throw new DOMException("The operation was aborted.", "AbortError");
+    }
+    throw error;
   } finally {
     signal?.removeEventListener("abort", onAbort);
     abortReader();
   }
 }
 
+/** True when the browser lost the SSE/fetch stream (sleep, network blip, etc.). */
+export function isStreamDisconnectError(error: unknown): boolean {
+  if (error instanceof DOMException && error.name === "AbortError") {
+    return false;
+  }
+  if (error instanceof TypeError) return true;
+
+  const message =
+    error instanceof Error
+      ? error.message
+      : typeof error === "string"
+        ? error
+        : "";
+  const lower = message.toLowerCase();
+  if (!lower) return false;
+
+  return (
+    lower.includes("error in input stream") ||
+    lower.includes("networkerror") ||
+    lower.includes("failed to fetch") ||
+    lower.includes("network request failed") ||
+    lower.includes("load failed") ||
+    lower.includes("stream closed unexpectedly") ||
+    lower.includes("the network connection was lost") ||
+    lower.includes("connection reset") ||
+    lower.includes("econnreset") ||
+    /connection.*(lost|closed|terminated)/i.test(lower)
+  );
+}
+
 export async function runWorkflowTest(
   input: {
     testName: string;
-    groups?: Array<{ name: string; queries: string[] }>;
+    groups?: Array<{
+      name: string;
+      queries: string[];
+      categoryType?: WorkflowTestCategoryType;
+      execution?: ExecutionPolicyOverrides;
+    }>;
     groupIds?: string[];
     agentProfileId?: string | null;
     dryRun?: boolean;
     delayMs?: number;
+    databaseConnectionId?: string | null;
   },
   handlers: WorkflowTestHandlers,
   signal?: AbortSignal,
@@ -887,14 +1015,33 @@ export async function runWorkflowTestGroup(
 export async function importWorkflowTestFailures(
   testId: string,
   runId: string,
+  groupName?: string,
 ): Promise<{
+  testId: string;
+  testName: string;
   groups: WorkflowTestGroupRecord[];
   added: number;
   skipped: number;
+  targetGroupId: string;
+  targetGroupName: string;
+  created: boolean;
 }> {
   return request(`/api/workflow-test/${testId}/groups/failures/import`, {
     method: "POST",
-    body: JSON.stringify({ runId }),
+    body: JSON.stringify({ runId, groupName }),
+  });
+}
+
+export async function updateWorkflowTestFailuresPolicy(
+  testId: string,
+  policy: {
+    categoryType?: string;
+    executionOverrides?: ExecutionPolicyOverrides | null;
+  },
+): Promise<{ groups: WorkflowTestGroupRecord[] }> {
+  return request(`/api/workflow-test/${testId}/groups/failures/policy`, {
+    method: "PATCH",
+    body: JSON.stringify(policy),
   });
 }
 
@@ -945,7 +1092,21 @@ export async function duplicateWorkflowTest(
 
 export async function rerunWorkflowTestFailures(
   runId: string,
-  input: { dryRun?: boolean; delayMs?: number } | undefined,
+  input:
+    | {
+        dryRun?: boolean;
+        delayMs?: number;
+        agentProfileId?: string | null;
+        categoryType?: string;
+        execution?: ExecutionPolicyOverrides | null;
+        groups?: Array<{
+          name: string;
+          queries: string[];
+          categoryType?: string;
+          execution?: ExecutionPolicyOverrides;
+        }>;
+      }
+    | undefined,
   handlers: WorkflowTestHandlers,
   signal?: AbortSignal,
 ): Promise<void> {

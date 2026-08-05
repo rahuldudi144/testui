@@ -38,6 +38,8 @@ model AgentProfile {
   embeddingModelName String?
   embeddingApiKey    String?           @db.Text
   embeddingBaseUrl   String?           @db.Text
+  /** Optional pgvector size; unset → derived from embedding model. */
+  embeddingDimension Int?
   createdAt      DateTime          @default(now())
   updatedAt      DateTime          @updatedAt
   workflowTests  WorkflowTest[]
@@ -64,6 +66,7 @@ model DatabaseConnection {
   schemaSyncError  String?   @db.Text
   createdAt        DateTime  @default(now())
   updatedAt        DateTime  @updatedAt
+  workflowTests    WorkflowTest[]
 
   @@index([userId])
 }
@@ -95,23 +98,26 @@ model Message {
 }
 
 model WorkflowTest {
-  id             String              @id @default(cuid())
-  userId         String
-  user           User                @relation(fields: [userId], references: [id], onDelete: Cascade)
-  name           String
-  agentProfileId String?
-  agentProfile   AgentProfile?       @relation(fields: [agentProfileId], references: [id], onDelete: SetNull)
-  suiteKey       String?
-  dryRun         Boolean             @default(false)
-  delayMs        Int                 @default(0)
-  createdAt      DateTime            @default(now())
-  updatedAt      DateTime            @updatedAt
-  groups         WorkflowTestGroup[]
-  runs           WorkflowTestRun[]
+  id                   String              @id @default(cuid())
+  userId               String
+  user                 User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name                 String
+  agentProfileId       String?
+  agentProfile         AgentProfile?       @relation(fields: [agentProfileId], references: [id], onDelete: SetNull)
+  databaseConnectionId String?
+  databaseConnection   DatabaseConnection? @relation(fields: [databaseConnectionId], references: [id], onDelete: SetNull)
+  suiteKey             String?
+  dryRun               Boolean             @default(false)
+  delayMs              Int                 @default(0)
+  createdAt            DateTime            @default(now())
+  updatedAt            DateTime            @updatedAt
+  groups               WorkflowTestGroup[]
+  runs                 WorkflowTestRun[]
 
   @@unique([userId, name, agentProfileId])
   @@index([userId, updatedAt(sort: Desc)])
   @@index([userId, suiteKey])
+  @@index([databaseConnectionId])
 }
 
 enum WorkflowTestGroupKind {
@@ -120,15 +126,17 @@ enum WorkflowTestGroupKind {
 }
 
 model WorkflowTestGroup {
-  id             String                @id @default(cuid())
-  workflowTestId String
-  workflowTest   WorkflowTest          @relation(fields: [workflowTestId], references: [id], onDelete: Cascade)
-  name           String
-  kind           WorkflowTestGroupKind @default(manual)
-  sortOrder      Int                   @default(0)
-  queries        WorkflowTestQuery[]
-  createdAt      DateTime              @default(now())
-  updatedAt      DateTime              @updatedAt
+  id                 String                @id @default(cuid())
+  workflowTestId     String
+  workflowTest       WorkflowTest          @relation(fields: [workflowTestId], references: [id], onDelete: Cascade)
+  name               String
+  kind               WorkflowTestGroupKind @default(manual)
+  categoryType       String                @default("STANDARD")
+  executionOverrides Json?
+  sortOrder          Int                   @default(0)
+  queries            WorkflowTestQuery[]
+  createdAt          DateTime              @default(now())
+  updatedAt          DateTime              @updatedAt
 
   @@index([workflowTestId, sortOrder])
 }

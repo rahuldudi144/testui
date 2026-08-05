@@ -1,14 +1,30 @@
-import { Fragment, useEffect, useMemo, useState } from "react";
-import { ChevronDown, ChevronRight, Download, RotateCcw, Save } from "lucide-react";
-import type { QueryAttempt, QueryRunResult, WorkflowTestCompletePayload } from "../../api";
+import { Fragment, memo, useEffect, useMemo, useState } from "react";
+import { ChevronDown, ChevronRight, Download, FolderInput, RotateCcw, Save } from "lucide-react";
+import type { QueryAttempt, QueryRunResult, WorkflowTestCompletePayload, WorkflowTestGroupRecord } from "../../api";
 import { isResumableWorkflowRun } from "../../api";
-import { getWorkflowTest, importWorkflowTestFailures } from "../../api";
+import { importWorkflowTestFailures } from "../../api";
 import { useWorkflowTestRunner } from "../../context/WorkflowTestRunnerContext";
 import { providerLabel } from "../../lib/llmProviders";
-import { getFailuresGroup } from "../../lib/workflowTestGroups";
+import {
+  categoryTypeLabel,
+  formatOutcomeLabel,
+  isFatalAbortMessage,
+  outcomesMatch,
+} from "../../lib/workflowTestReportHelpers";
 import { cn } from "../../lib/cn";
+import { Alert } from "../ui/Alert";
 import { Badge } from "../ui/Badge";
 import { Button } from "../ui/Button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "../ui/Dialog";
+import { Input } from "../ui/Input";
+import { Label } from "../ui/Label";
 import {
   Table,
   TableBody,
@@ -28,9 +44,21 @@ import { WorkflowTestMetricsDashboard } from "./WorkflowTestMetricsDashboard";
 
 interface Props {
   report: WorkflowTestCompletePayload;
+  onLoadFailuresInSetup?: () => void;
+  onFailuresImported?: (result: {
+    testId: string;
+    testName?: string;
+    groups: WorkflowTestGroupRecord[];
+  }) => void;
 }
 
 type StatusFilter = "all" | "pass" | "fail" | "error" | "planner_skip";
+
+const RESULTS_PAGE_SIZE = 50;
+
+function expectedOf(result: QueryRunResult): string | undefined {
+  return result.expectedOutcome ?? result.expectedResult;
+}
 
 function statusVariant(
   status: QueryRunResult["status"],
@@ -177,6 +205,30 @@ function ResultInspector({ result }: { result: QueryRunResult }) {
       <InspectMetaGrid
         items={[
           { label: "Status", value: statusLabel(result.status) },
+          { label: "Category", value: categoryTypeLabel(result.categoryType) },
+          {
+            label: "Expected outcome",
+            value: formatOutcomeLabel(expectedOf(result)),
+          },
+          {
+            label: "Actual outcome",
+            value: formatOutcomeLabel(result.actualOutcome),
+          },
+          {
+            label: "History mode",
+            value: result.history ?? "—",
+          },
+          ...(result.stopOnFailure !== undefined
+            ? [
+                {
+                  label: "Stop on failure",
+                  value: result.stopOnFailure ? "yes" : "no",
+                },
+              ]
+            : []),
+          ...(result.timeoutMs !== undefined
+            ? [{ label: "Timeout", value: `${result.timeoutMs} ms` }]
+            : []),
           {
             label: "Failure phase",
             value: result.failurePhase === "none" ? "—" : result.failurePhase,
@@ -253,39 +305,102 @@ function ResultInspector({ result }: { result: QueryRunResult }) {
   );
 }
 
-export function WorkflowTestReport({ report }: Props) {
-  const { runGroup, rerunFailuresInReport, resumeFromRun, running } =
+export function WorkflowTestReport({
+  report,
+  onLoadFailuresInSetup,
+  onFailuresImported,
+}: Props) {
+  const { rerunFailuresInReport, resumeFromRun, running, notifySavedGroupsChanged } =
     useWorkflowTestRunner();
   const [filter, setFilter] = useState<StatusFilter>("all");
+  const [categoryFilter, setCategoryFilter] = useState<string>("all");
+  const [mismatchOnly, setMismatchOnly] = useState(false);
   const [expandedKey, setExpandedKey] = useState<string | null>(null);
-  const [failuresGroupId, setFailuresGroupId] = useState<string | null>(null);
+  const [page, setPage] = useState(0);
   const [importNotice, setImportNotice] = useState<string | null>(null);
   const [importing, setImporting] = useState(false);
+  const [saveDialogOpen, setSaveDialogOpen] = useState(false);
+  const [saveGroupName, setSaveGroupName] = useState(
+    () => `${report.testName} — Failed queries`,
+  );
 
   const { summary } = report;
   const failureCount = summary.failed + summary.errors;
   const canImport = failureCount > 0 && Boolean(report.testId && report.runId);
+  const canLoadFailuresInSetup =
+    failureCount > 0 && Boolean(onLoadFailuresInSetup && report.runId);
   const canResume = isResumableWorkflowRun(report);
   const remainingCount = Math.max(
     0,
     (summary.plannedQueries ?? report.results.length) - report.results.length,
   );
 
+  const fatalAbortMessage = useMemo(() => {
+    for (const result of report.results) {
+      if (isFatalAbortMessage(result.errorMessage)) {
+        return result.errorMessage!;
+      }
+    }
+    return null;
+  }, [report.results]);
+
+  const categoryOptions = useMemo(() => {
+    const keys = new Set<string>();
+    for (const result of report.results) {
+      keys.add(result.categoryType ?? "STANDARD");
+    }
+    if (summary.byCategory) {
+      for (const key of Object.keys(summary.byCategory)) keys.add(key);
+    }
+    return [...keys].sort();
+  }, [report.results, summary.byCategory]);
+
+  const categoryRows = useMemo(() => {
+    if (summary.byCategory && Object.keys(summary.byCategory).length > 0) {
+      return Object.entries(summary.byCategory);
+    }
+    const map = new Map<
+      string,
+      { total: number; passed: number; failed: number; errors: number; plannerSkipped: number }
+    >();
+    for (const result of report.results) {
+      const key = result.categoryType ?? "STANDARD";
+      const stats = map.get(key) ?? {
+        total: 0,
+        passed: 0,
+        failed: 0,
+        errors: 0,
+        plannerSkipped: 0,
+      };
+      stats.total += 1;
+      if (result.status === "pass") stats.passed += 1;
+      else if (result.status === "error") stats.errors += 1;
+      else if (result.status === "planner_skip") stats.plannerSkipped += 1;
+      else stats.failed += 1;
+      map.set(key, stats);
+    }
+    return [...map.entries()];
+  }, [report.results, summary.byCategory]);
+
+  const outcomeMatched =
+    summary.outcomeMatched ??
+    report.results.filter(
+      (r) =>
+        r.status !== "error" &&
+        expectedOf(r) &&
+        outcomesMatch(expectedOf(r), r.actualOutcome),
+    ).length;
+  const outcomeMismatched =
+    summary.outcomeMismatched ??
+    report.results.filter(
+      (r) =>
+        r.status !== "error" &&
+        expectedOf(r) &&
+        !outcomesMatch(expectedOf(r), r.actualOutcome),
+    ).length;
+
   useEffect(() => {
-    if (!report.testId) return;
-    let cancelled = false;
-    void getWorkflowTest(report.testId)
-      .then((test) => {
-        if (cancelled) return;
-        const failures = getFailuresGroup(test.groups);
-        if (failures && failures.queries.length > 0) {
-          setFailuresGroupId(failures.id);
-        }
-      })
-      .catch(() => undefined);
-    return () => {
-      cancelled = true;
-    };
+    setImportNotice(null);
   }, [report.testId, report.runId]);
 
   async function handleSaveFailures() {
@@ -293,15 +408,27 @@ export function WorkflowTestReport({ report }: Props) {
     setImporting(true);
     setImportNotice(null);
     try {
-      const result = await importWorkflowTestFailures(report.testId, report.runId);
-      const failures = getFailuresGroup(result.groups);
-      setFailuresGroupId(failures?.id ?? null);
+      const result = await importWorkflowTestFailures(
+        report.testId,
+        report.runId,
+        saveGroupName,
+      );
       const skippedText =
         result.skipped > 0 ? `, skipped ${result.skipped} duplicate(s)` : "";
-      setImportNotice(`Added ${result.added} quer${result.added === 1 ? "y" : "ies"} to failures group${skippedText}.`);
+      const action = result.created ? "Created" : "Updated";
+      setImportNotice(
+        `${action} test "${result.testName}" with ${result.added} quer${result.added === 1 ? "y" : "ies"} across ${result.targetGroupName}${skippedText}. Find it under Tests.`,
+      );
+      onFailuresImported?.({
+        testId: result.testId,
+        testName: result.testName,
+        groups: result.groups,
+      });
+      notifySavedGroupsChanged();
+      setSaveDialogOpen(false);
     } catch (err) {
       setImportNotice(
-        err instanceof Error ? err.message : "Failed to save failures to group.",
+        err instanceof Error ? err.message : "Failed to save failures as a new test.",
       );
     } finally {
       setImporting(false);
@@ -326,19 +453,38 @@ export function WorkflowTestReport({ report }: Props) {
     });
   }
 
-  async function handleRunFailures() {
-    if (!report.testId || !failuresGroupId) return;
-    await runGroup(report.testId, failuresGroupId, {
-      testName: report.testName,
-      dryRun: report.dryRun,
-      delayMs: report.delayMs ?? 0,
-    });
-  }
-
   const filtered = useMemo(() => {
-    if (filter === "all") return report.results;
-    return report.results.filter((r) => r.status === filter);
-  }, [filter, report.results]);
+    return report.results.filter((r) => {
+      if (filter !== "all" && r.status !== filter) return false;
+      if (
+        categoryFilter !== "all" &&
+        (r.categoryType ?? "STANDARD") !== categoryFilter
+      ) {
+        return false;
+      }
+      if (mismatchOnly) {
+        const expected = expectedOf(r);
+        if (!expected || outcomesMatch(expected, r.actualOutcome)) return false;
+      }
+      return true;
+    });
+  }, [filter, categoryFilter, mismatchOnly, report.results]);
+
+  useEffect(() => {
+    setPage(0);
+    setExpandedKey(null);
+  }, [filter, categoryFilter, mismatchOnly, report.runId]);
+
+  const pageCount = Math.max(1, Math.ceil(filtered.length / RESULTS_PAGE_SIZE));
+  const safePage = Math.min(page, pageCount - 1);
+  const pageRows = useMemo(
+    () =>
+      filtered.slice(
+        safePage * RESULTS_PAGE_SIZE,
+        safePage * RESULTS_PAGE_SIZE + RESULTS_PAGE_SIZE,
+      ),
+    [filtered, safePage],
+  );
 
   function rowKey(result: QueryRunResult, index: number): string {
     return `${result.groupName}-${index}-${result.query.slice(0, 24)}`;
@@ -388,17 +534,31 @@ export function WorkflowTestReport({ report }: Props) {
               Resume ({remainingCount} remaining)
             </Button>
           )}
+          {canLoadFailuresInSetup && (
+            <Button
+              type="button"
+              variant="secondary"
+              size="sm"
+              disabled={running}
+              onClick={onLoadFailuresInSetup}
+            >
+              <FolderInput className="h-4 w-4" />
+              Load failures in setup
+            </Button>
+          )}
           {canImport && (
             <Button
               type="button"
               variant="secondary"
               size="sm"
-              loading={importing}
               disabled={running}
-              onClick={() => void handleSaveFailures()}
+              onClick={() => {
+                setSaveGroupName(`${report.testName} — Failed queries`);
+                setSaveDialogOpen(true);
+              }}
             >
               <Save className="h-4 w-4" />
-              Save failures to group
+              Save failures as new test
             </Button>
           )}
           {canImport && report.runId && (
@@ -413,23 +573,60 @@ export function WorkflowTestReport({ report }: Props) {
               Rerun failures in this report
             </Button>
           )}
-          {failuresGroupId && (
-            <Button
-              type="button"
-              size="sm"
-              disabled={running}
-              onClick={() => void handleRunFailures()}
-            >
-              <RotateCcw className="h-4 w-4" />
-              Run failures only
-            </Button>
-          )}
           <Button type="button" variant="secondary" size="sm" onClick={exportJson}>
             <Download className="h-4 w-4" />
             Export JSON
           </Button>
         </div>
       </div>
+
+      <Dialog open={saveDialogOpen} onOpenChange={setSaveDialogOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Save failures as new test</DialogTitle>
+            <DialogDescription>
+              Creates a separate workflow test in Tests with the failed queries kept
+              in their original groups and category types. You can load it from Tests
+              later and run with a different agent or settings. Saving again with the
+              same name appends new failures to that test.
+            </DialogDescription>
+          </DialogHeader>
+          <div>
+            <Label htmlFor="save-failures-group-name">New test name</Label>
+            <Input
+              id="save-failures-group-name"
+              className="mt-1"
+              value={saveGroupName}
+              onChange={(e) => setSaveGroupName(e.target.value)}
+              placeholder={`${report.testName} — Failed queries`}
+              autoFocus
+            />
+          </div>
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="secondary"
+              onClick={() => setSaveDialogOpen(false)}
+              disabled={importing}
+            >
+              Cancel
+            </Button>
+            <Button
+              type="button"
+              loading={importing}
+              onClick={() => void handleSaveFailures()}
+            >
+              Save
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {fatalAbortMessage && (
+        <Alert variant="error">
+          Run aborted due to a fatal provider error: {fatalAbortMessage}
+        </Alert>
+      )}
 
       {canResume && (
         <p className="text-sm text-amber-700 dark:text-amber-400">
@@ -453,6 +650,8 @@ export function WorkflowTestReport({ report }: Props) {
             <Badge variant="destructive">{summary.errors} errors</Badge>
             <Badge variant="outline">{summary.plannerSkipped} planner skip</Badge>
             <Badge variant="info">{summary.total} total</Badge>
+            <Badge variant="success">{outcomeMatched} outcome matched</Badge>
+            <Badge variant="destructive">{outcomeMismatched} outcome mismatched</Badge>
             {summary.executionCount !== undefined && (
               <Badge variant="outline">{summary.executionCount} executions</Badge>
             )}
@@ -473,36 +672,71 @@ export function WorkflowTestReport({ report }: Props) {
             </div>
           )}
 
-          {groupRows.length > 0 && (
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Group</TableHead>
-                  <TableHead>Total</TableHead>
-                  <TableHead>Passed</TableHead>
-                  <TableHead>Failed</TableHead>
-                  <TableHead>Errors</TableHead>
-                  <TableHead>Planner skip</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {groupRows.map(([name, stats]) => (
-                  <TableRow key={name}>
-                    <TableCell className="font-medium">{name}</TableCell>
-                    <TableCell>{stats.total}</TableCell>
-                    <TableCell>{stats.passed}</TableCell>
-                    <TableCell>{stats.failed}</TableCell>
-                    <TableCell>{stats.errors}</TableCell>
-                    <TableCell>{stats.plannerSkipped}</TableCell>
+          {categoryRows.length > 0 && (
+            <div className="space-y-2">
+              <p className="text-xs font-medium text-muted-foreground">By category</p>
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Category</TableHead>
+                    <TableHead>Total</TableHead>
+                    <TableHead>Passed</TableHead>
+                    <TableHead>Failed</TableHead>
+                    <TableHead>Errors</TableHead>
+                    <TableHead>Planner skip</TableHead>
                   </TableRow>
-                ))}
-              </TableBody>
-            </Table>
+                </TableHeader>
+                <TableBody>
+                  {categoryRows.map(([name, stats]) => (
+                    <TableRow key={name}>
+                      <TableCell className="font-medium">
+                        {categoryTypeLabel(name)}
+                      </TableCell>
+                      <TableCell>{stats.total}</TableCell>
+                      <TableCell>{stats.passed}</TableCell>
+                      <TableCell>{stats.failed}</TableCell>
+                      <TableCell>{stats.errors}</TableCell>
+                      <TableCell>{stats.plannerSkipped}</TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </div>
+          )}
+
+          {groupRows.length > 0 && (
+            <div className="space-y-2">
+              <p className="text-xs font-medium text-muted-foreground">By group</p>
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Group</TableHead>
+                    <TableHead>Total</TableHead>
+                    <TableHead>Passed</TableHead>
+                    <TableHead>Failed</TableHead>
+                    <TableHead>Errors</TableHead>
+                    <TableHead>Planner skip</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {groupRows.map(([name, stats]) => (
+                    <TableRow key={name}>
+                      <TableCell className="font-medium">{name}</TableCell>
+                      <TableCell>{stats.total}</TableCell>
+                      <TableCell>{stats.passed}</TableCell>
+                      <TableCell>{stats.failed}</TableCell>
+                      <TableCell>{stats.errors}</TableCell>
+                      <TableCell>{stats.plannerSkipped}</TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </div>
           )}
         </div>
       </InspectSection>
 
-      <div className="flex flex-wrap gap-2">
+      <div className="flex flex-wrap items-center gap-2">
         {(["all", "pass", "fail", "error", "planner_skip"] as StatusFilter[]).map(
           (value) => (
             <Button
@@ -516,6 +750,34 @@ export function WorkflowTestReport({ report }: Props) {
             </Button>
           ),
         )}
+        <select
+          className="h-8 rounded-md border border-input bg-background px-2 text-xs"
+          value={categoryFilter}
+          onChange={(e) => setCategoryFilter(e.target.value)}
+          aria-label="Filter by category"
+        >
+          <option value="all">All categories</option>
+          {categoryOptions.map((cat) => (
+            <option key={cat} value={cat}>
+              {categoryTypeLabel(cat)}
+            </option>
+          ))}
+        </select>
+        <label className="flex items-center gap-2 text-xs text-muted-foreground">
+          <input
+            type="checkbox"
+            className="rounded border-input"
+            checked={mismatchOnly}
+            onChange={(e) => setMismatchOnly(e.target.checked)}
+          />
+          Outcome mismatches only
+        </label>
+        <span className="text-xs text-muted-foreground">
+          {filtered.length} shown
+          {filtered.length !== report.results.length
+            ? ` of ${report.results.length}`
+            : ""}
+        </span>
       </div>
 
       <Table>
@@ -524,7 +786,11 @@ export function WorkflowTestReport({ report }: Props) {
             <TableHead className="w-8" />
             <TableHead>Group</TableHead>
             <TableHead>Query</TableHead>
+            <TableHead>Category</TableHead>
             <TableHead>Status</TableHead>
+            <TableHead>Expected</TableHead>
+            <TableHead>Actual</TableHead>
+            <TableHead>History</TableHead>
             <TableHead>Phase</TableHead>
             <TableHead>Failed node</TableHead>
             <TableHead>Duration</TableHead>
@@ -533,60 +799,19 @@ export function WorkflowTestReport({ report }: Props) {
           </TableRow>
         </TableHeader>
         <TableBody>
-          {filtered.map((result, index) => {
-            const key = rowKey(result, index);
+          {pageRows.map((result, index) => {
+            const absoluteIndex = safePage * RESULTS_PAGE_SIZE + index;
+            const key = rowKey(result, absoluteIndex);
             const expanded = expandedKey === key;
-
             return (
-              <Fragment key={key}>
-                <TableRow>
-                  <TableCell>
-                    <button
-                      type="button"
-                      onClick={() => setExpandedKey(expanded ? null : key)}
-                      className="rounded p-1 text-muted-foreground hover:bg-muted focus-ring"
-                      aria-label={expanded ? "Collapse details" : "Expand details"}
-                    >
-                      {expanded ? (
-                        <ChevronDown className="h-4 w-4" />
-                      ) : (
-                        <ChevronRight className="h-4 w-4" />
-                      )}
-                    </button>
-                  </TableCell>
-                  <TableCell className="whitespace-nowrap">{result.groupName}</TableCell>
-                  <TableCell className="max-w-[280px] truncate" title={result.query}>
-                    {result.query}
-                  </TableCell>
-                  <TableCell>
-                    <Badge variant={statusVariant(result.status)} className="normal-case">
-                      {statusLabel(result.status)}
-                    </Badge>
-                  </TableCell>
-                  <TableCell className="text-xs text-muted-foreground">
-                    {result.failurePhase === "none" ? "—" : result.failurePhase}
-                  </TableCell>
-                  <TableCell className="font-mono text-xs">
-                    {result.failedNode ?? "—"}
-                  </TableCell>
-                  <TableCell className="tabular-nums text-xs">
-                    {result.durationMs} ms
-                  </TableCell>
-                  <TableCell className="tabular-nums text-xs">
-                    {result.executionCount ?? result.attempts?.length ?? 1}
-                  </TableCell>
-                  <TableCell className="tabular-nums text-xs">
-                    {formatTokens(result.totalTokens)}
-                  </TableCell>
-                </TableRow>
-                {expanded && (
-                  <TableRow className="bg-muted/20">
-                    <TableCell colSpan={9}>
-                      <ResultInspector result={result} />
-                    </TableCell>
-                  </TableRow>
-                )}
-              </Fragment>
+              <ResultTableRows
+                key={key}
+                result={result}
+                expanded={expanded}
+                onToggleExpand={() =>
+                  setExpandedKey(expanded ? null : key)
+                }
+              />
             );
           })}
         </TableBody>
@@ -597,6 +822,126 @@ export function WorkflowTestReport({ report }: Props) {
           No results match this filter.
         </p>
       )}
+
+      {filtered.length > RESULTS_PAGE_SIZE && (
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <p className="text-xs text-muted-foreground">
+            Page {safePage + 1} of {pageCount} · {RESULTS_PAGE_SIZE} per page
+          </p>
+          <div className="flex gap-2">
+            <Button
+              type="button"
+              size="sm"
+              variant="secondary"
+              disabled={safePage <= 0}
+              onClick={() => {
+                setExpandedKey(null);
+                setPage((p) => Math.max(0, p - 1));
+              }}
+            >
+              Previous
+            </Button>
+            <Button
+              type="button"
+              size="sm"
+              variant="secondary"
+              disabled={safePage >= pageCount - 1}
+              onClick={() => {
+                setExpandedKey(null);
+                setPage((p) => Math.min(pageCount - 1, p + 1));
+              }}
+            >
+              Next
+            </Button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
+
+const ResultTableRows = memo(function ResultTableRows({
+  result,
+  expanded,
+  onToggleExpand,
+}: {
+  result: QueryRunResult;
+  expanded: boolean;
+  onToggleExpand: () => void;
+}) {
+  const expected = expectedOf(result);
+  const matched = outcomesMatch(expected, result.actualOutcome);
+
+  return (
+    <Fragment>
+      <TableRow>
+        <TableCell>
+          <button
+            type="button"
+            onClick={onToggleExpand}
+            className="rounded p-1 text-muted-foreground hover:bg-muted focus-ring"
+            aria-label={expanded ? "Collapse details" : "Expand details"}
+          >
+            {expanded ? (
+              <ChevronDown className="h-4 w-4" />
+            ) : (
+              <ChevronRight className="h-4 w-4" />
+            )}
+          </button>
+        </TableCell>
+        <TableCell className="whitespace-nowrap">{result.groupName}</TableCell>
+        <TableCell className="max-w-[280px] truncate" title={result.query}>
+          {result.query}
+        </TableCell>
+        <TableCell>
+          <Badge variant="outline" className="normal-case">
+            {categoryTypeLabel(result.categoryType)}
+          </Badge>
+        </TableCell>
+        <TableCell>
+          <Badge variant={statusVariant(result.status)} className="normal-case">
+            {statusLabel(result.status)}
+          </Badge>
+        </TableCell>
+        <TableCell className="text-xs text-muted-foreground">
+          {formatOutcomeLabel(expected)}
+        </TableCell>
+        <TableCell
+          className={cn(
+            "text-xs",
+            expected && result.actualOutcome && !matched
+              ? "text-destructive"
+              : "text-muted-foreground",
+          )}
+        >
+          {formatOutcomeLabel(result.actualOutcome)}
+        </TableCell>
+        <TableCell className="text-xs text-muted-foreground">
+          {result.history ?? "—"}
+        </TableCell>
+        <TableCell className="text-xs text-muted-foreground">
+          {result.failurePhase === "none" ? "—" : result.failurePhase}
+        </TableCell>
+        <TableCell className="font-mono text-xs">
+          {result.failedNode ?? "—"}
+        </TableCell>
+        <TableCell className="tabular-nums text-xs">
+          {result.durationMs} ms
+        </TableCell>
+        <TableCell className="tabular-nums text-xs">
+          {result.executionCount ?? result.attempts?.length ?? 1}
+        </TableCell>
+        <TableCell className="tabular-nums text-xs">
+          {formatTokens(result.totalTokens)}
+        </TableCell>
+      </TableRow>
+      {expanded && (
+        <TableRow className="bg-muted/20">
+          <TableCell colSpan={13}>
+            <ResultInspector result={result} />
+          </TableCell>
+        </TableRow>
+      )}
+    </Fragment>
+  );
+});

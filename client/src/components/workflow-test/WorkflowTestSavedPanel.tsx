@@ -22,7 +22,7 @@ import {
 } from "../../api";
 import { useWorkflowTestRunner } from "../../context/WorkflowTestRunnerContext";
 import { providerLabel } from "../../lib/llmProviders";
-import { getFailuresGroup, groupsToFormInput } from "../../lib/workflowTestGroups";
+import { getFailuresGroup, groupsToFormInput, resolveFailuresRunAction } from "../../lib/workflowTestGroups";
 import type { StressTestGroupInput } from "../../lib/parseQueryGroups";
 import { cn } from "../../lib/cn";
 import { Badge } from "../ui/Badge";
@@ -44,16 +44,19 @@ interface Props {
   disabled?: boolean;
   refreshToken?: number;
   onLoadTest: (data: {
+    testId: string;
+    linkedRunId: string | null;
     testName: string;
     groups: StressTestGroupInput[];
     failuresGroup: WorkflowTestGroupRecord | null;
     dryRun: boolean;
     delayMs: number;
     agentProfileId?: string | null;
+    databaseConnectionId?: string | null;
   }) => void;
   onLoadReport: (report: WorkflowTestCompletePayload) => void;
   onError: (message: string) => void;
-  onTestsLoaded?: (count: number) => void;
+  onTestsLoaded?: (counts: { testCount: number; runCount: number }) => void;
 }
 
 function formatSummary(summary: {
@@ -130,7 +133,8 @@ export function WorkflowTestSavedPanel({
   const [duplicateAgentId, setDuplicateAgentId] = useState("");
   const [duplicateName, setDuplicateName] = useState("");
   const [duplicating, setDuplicating] = useState(false);
-  const { run, runGroup, running: runnerActive } = useWorkflowTestRunner();
+  const { run, runGroup, rerunFailuresInReport, running: runnerActive } =
+    useWorkflowTestRunner();
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -141,7 +145,10 @@ export function WorkflowTestSavedPanel({
       ]);
       setTests(list);
       setAgents(agentList.agents);
-      onTestsLoaded?.(list.length);
+      onTestsLoaded?.({
+        testCount: list.length,
+        runCount: list.reduce((sum, test) => sum + (test.runCount ?? 0), 0),
+      });
     } catch (err) {
       onError(err instanceof Error ? err.message : "Failed to load saved tests.");
     } finally {
@@ -191,14 +198,22 @@ export function WorkflowTestSavedPanel({
   const suiteGroups = useMemo(() => groupTestsBySuite(filtered), [filtered]);
 
   async function handleLoadTest(test: SavedWorkflowTest) {
-    onLoadTest({
-      testName: test.name,
-      groups: groupsToFormInput(test.groups),
-      failuresGroup: getFailuresGroup(test.groups) ?? null,
-      dryRun: test.dryRun,
-      delayMs: test.delayMs,
-      agentProfileId: test.agentProfileId,
-    });
+    try {
+      const fresh = await getWorkflowTest(test.id);
+      onLoadTest({
+        testId: fresh.id,
+        linkedRunId: fresh.runs?.[0]?.id ?? test.lastRun?.id ?? null,
+        testName: fresh.name,
+        groups: groupsToFormInput(fresh.groups),
+        failuresGroup: getFailuresGroup(fresh.groups) ?? null,
+        dryRun: fresh.dryRun,
+        delayMs: fresh.delayMs,
+        agentProfileId: fresh.agentProfileId,
+        databaseConnectionId: fresh.databaseConnectionId,
+      });
+    } catch (err) {
+      onError(err instanceof Error ? err.message : "Failed to load saved test.");
+    }
   }
 
   async function handleRerun(test: SavedWorkflowTest) {
@@ -209,12 +224,18 @@ export function WorkflowTestSavedPanel({
 
     const manualGroups = test.groups
       .filter((group) => group.kind === "manual")
-      .map((group) => ({ name: group.name, queries: group.queries }));
+      .map((group) => ({
+        name: group.name,
+        queries: group.queries,
+        categoryType: group.categoryType,
+        execution: group.executionOverrides ?? undefined,
+      }));
 
     await run({
       testName: test.name,
       groups: manualGroups,
       agentProfileId: test.agentProfileId,
+      databaseConnectionId: test.databaseConnectionId,
       dryRun: test.dryRun,
       delayMs: test.delayMs,
     });
@@ -224,11 +245,23 @@ export function WorkflowTestSavedPanel({
     const failures = getFailuresGroup(test.groups);
     if (!failures || failures.queries.length === 0) return;
 
-    await runGroup(test.id, failures.id, {
+    const action = resolveFailuresRunAction({
+      linkedRunId: test.lastRun?.id ?? null,
+      loadedTestId: test.id,
+      failuresGroupId: failures.id,
+    });
+    if (!action) return;
+
+    const options = {
       testName: test.name,
       dryRun: test.dryRun,
       delayMs: test.delayMs,
-    });
+    };
+    if (action.type === "rerun-report") {
+      await rerunFailuresInReport(action.runId, options);
+      return;
+    }
+    await runGroup(action.testId, action.groupId, options);
   }
 
   async function handleLoadRun(runId: string) {

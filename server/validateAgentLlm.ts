@@ -64,16 +64,37 @@ export function validateAgentLlmFields(input: {
  * - local: model + base URL required
  * - ollama: model required; base URL optional
  */
+export function parseEmbeddingDimension(
+  value?: number | string | null,
+): { dimension?: number; error?: string } {
+  if (value === undefined || value === null || value === "") {
+    return {};
+  }
+  const n = typeof value === "number" ? value : Number(String(value).trim());
+  if (!Number.isFinite(n) || !Number.isInteger(n) || n <= 0) {
+    return {
+      error: "embeddingDimension must be a positive integer.",
+    };
+  }
+  return { dimension: n };
+}
+
 export function validateAgentEmbeddingFields(input: {
   embeddingProvider?: string | null;
   embeddingModelName?: string | null;
   embeddingApiKey?: string | null;
   storedEmbeddingApiKey?: string | null;
   embeddingBaseUrl?: string | null;
+  embeddingDimension?: number | string | null;
   /** Chat LLM key — openai/gemini fall back to this in DatabaseAgent. */
   chatApiKey?: string | null;
   storedChatApiKey?: string | null;
-}): { provider: EmbeddingProvider | null; error?: string } {
+}): { provider: EmbeddingProvider | null; error?: string; embeddingDimension?: number } {
+  const dimParsed = parseEmbeddingDimension(input.embeddingDimension);
+  if (dimParsed.error) {
+    return { provider: null, error: dimParsed.error };
+  }
+
   const provider = normalizeEmbeddingProviderInput(input.embeddingProvider);
   if (input.embeddingProvider?.trim() && !provider) {
     return {
@@ -84,7 +105,12 @@ export function validateAgentEmbeddingFields(input: {
   }
 
   if (!provider) {
-    return { provider: null };
+    return {
+      provider: null,
+      ...(dimParsed.dimension !== undefined
+        ? { embeddingDimension: dimParsed.dimension }
+        : {}),
+    };
   }
 
   if (
@@ -119,7 +145,12 @@ export function validateAgentEmbeddingFields(input: {
     }
   }
 
-  return { provider };
+  return {
+    provider,
+    ...(dimParsed.dimension !== undefined
+      ? { embeddingDimension: dimParsed.dimension }
+      : {}),
+  };
 }
 
 export { providerShowsApiKey };

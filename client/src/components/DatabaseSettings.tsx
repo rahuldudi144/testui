@@ -4,14 +4,17 @@ import {
   activateDatabase,
   createDatabase,
   deleteDatabase,
+  fetchConnectionKnowledgeDocuments,
   listDatabases,
   indexDatabaseKnowledge,
   testDatabaseConnection,
   updateDatabase,
+  type KnowledgeDocument,
   type SchemaSyncStatus,
   type UserDatabase,
 } from "../api";
 import { cn } from "../lib/cn";
+import { KnowledgeDocumentView } from "./KnowledgeDocumentView";
 import { Alert } from "./ui/Alert";
 import { Badge } from "./ui/Badge";
 import { Button } from "./ui/Button";
@@ -182,6 +185,10 @@ export function DatabaseSettings({ onConnectionChange }: Props) {
   const [businessContext, setBusinessContext] = useState("");
   const [knowledgeDbUri, setKnowledgeDbUri] = useState("");
   const [indexProgress, setIndexProgress] = useState<string | null>(null);
+  const [knowledgePreviewById, setKnowledgePreviewById] = useState<
+    Record<string, KnowledgeDocument[]>
+  >({});
+  const [loadingPreviewId, setLoadingPreviewId] = useState<string | null>(null);
 
   const [editName, setEditName] = useState("");
   const [editDbType, setEditDbType] = useState<"postgres" | "mysql">("postgres");
@@ -372,9 +379,43 @@ export function DatabaseSettings({ onConnectionChange }: Props) {
     }
   }
 
+  function upsertPreviewDocument(
+    connectionId: string,
+    document: KnowledgeDocument,
+  ) {
+    setKnowledgePreviewById((prev) => {
+      const existing = prev[connectionId] ?? [];
+      const next = existing.filter((d) => d.table !== document.table);
+      next.push(document);
+      next.sort((a, b) => a.table.localeCompare(b.table));
+      return { ...prev, [connectionId]: next };
+    });
+  }
+
+  async function loadKnowledgePreview(connectionId: string) {
+    setLoadingPreviewId(connectionId);
+    try {
+      const documents = await fetchConnectionKnowledgeDocuments(connectionId);
+      setKnowledgePreviewById((prev) => ({
+        ...prev,
+        [connectionId]: documents,
+      }));
+    } catch (err) {
+      showConnectionNotice(
+        connectionId,
+        "error",
+        err instanceof Error ? err.message : "Failed to load indexed knowledge.",
+      );
+    } finally {
+      setLoadingPreviewId(null);
+    }
+  }
+
   async function handleBuildKnowledge(id: string) {
     setSyncingId(id);
+    setExpandedId(id);
     setIndexProgress(null);
+    setKnowledgePreviewById((prev) => ({ ...prev, [id]: [] }));
     dismissConnectionNotice(id);
     try {
       await indexDatabaseKnowledge(id, {
@@ -383,6 +424,13 @@ export function DatabaseSettings({ onConnectionChange }: Props) {
             setIndexProgress(
               `Building ${event.table} (${event.completed}/${event.total})`,
             );
+          } else if (event.type === "knowledge_document") {
+            upsertPreviewDocument(id, event.document);
+          } else if (event.type === "knowledge_documents") {
+            setKnowledgePreviewById((prev) => ({
+              ...prev,
+              [id]: event.documents,
+            }));
           } else if (event.type === "knowledge_completed") {
             setIndexProgress("Finishing…");
           }
@@ -740,6 +788,43 @@ export function DatabaseSettings({ onConnectionChange }: Props) {
                               : ""}
                           </p>
                         )}
+
+                        {!editing &&
+                          (syncingId === db.id ||
+                            (knowledgePreviewById[db.id]?.length ?? 0) > 0 ||
+                            db.schemaSyncStatus === "ready") && (
+                            <div className="space-y-2 rounded-md border border-border bg-background p-3">
+                              {syncingId === db.id ? (
+                                <KnowledgeDocumentView
+                                  documents={knowledgePreviewById[db.id] ?? []}
+                                  title="Indexing preview"
+                                  openLatest
+                                />
+                              ) : (knowledgePreviewById[db.id]?.length ?? 0) >
+                                0 ? (
+                                <KnowledgeDocumentView
+                                  documents={knowledgePreviewById[db.id] ?? []}
+                                  title="Indexed knowledge"
+                                />
+                              ) : db.schemaSyncStatus === "ready" ? (
+                                <div className="flex flex-wrap items-center justify-between gap-2">
+                                  <p className="text-sm text-muted-foreground">
+                                    Load stored knowledge documents from the
+                                    vector DB.
+                                  </p>
+                                  <Button
+                                    type="button"
+                                    variant="secondary"
+                                    size="sm"
+                                    loading={loadingPreviewId === db.id}
+                                    onClick={() => void loadKnowledgePreview(db.id)}
+                                  >
+                                    View indexed knowledge
+                                  </Button>
+                                </div>
+                              ) : null}
+                            </div>
+                          )}
 
                         {editing ? (
                           <div className="grid w-full gap-4">

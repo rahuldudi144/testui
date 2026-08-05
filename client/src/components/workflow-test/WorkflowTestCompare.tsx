@@ -13,6 +13,11 @@ import {
   countOverlappingQueries,
   finalAnswerText,
 } from "../../lib/workflowTestCompare";
+import {
+  categoryTypeLabel,
+  formatOutcomeLabel,
+  outcomesMatch,
+} from "../../lib/workflowTestReportHelpers";
 import { cn } from "../../lib/cn";
 import { Alert } from "../ui/Alert";
 import { Badge } from "../ui/Badge";
@@ -494,6 +499,10 @@ export function WorkflowTestCompare({ refreshToken, onError }: Props) {
               <TableRow>
                 <TableHead className="w-8" />
                 <TableHead>Query</TableHead>
+                <TableHead>Category</TableHead>
+                <TableHead>Expected</TableHead>
+                <TableHead>A actual</TableHead>
+                <TableHead>B actual</TableHead>
                 <TableHead>A status</TableHead>
                 <TableHead>B status</TableHead>
                 <TableHead>Status</TableHead>
@@ -507,12 +516,37 @@ export function WorkflowTestCompare({ refreshToken, onError }: Props) {
                 const expanded = expandedKey === row.queryKey;
                 const statusDiffers = row.a && row.b && row.a.status !== row.b.status;
                 const answerDiffers = row.a && row.b && row.answerMatch === false;
+                const category =
+                  row.a?.categoryType ?? row.b?.categoryType ?? "STANDARD";
+                const expected =
+                  row.a?.expectedOutcome ??
+                  row.a?.expectedResult ??
+                  row.b?.expectedOutcome ??
+                  row.b?.expectedResult;
+                const outcomeA = row.a?.actualOutcome;
+                const outcomeB = row.b?.actualOutcome;
+                const outcomeDiffers =
+                  Boolean(row.a && row.b) &&
+                  outcomeA !== outcomeB &&
+                  Boolean(outcomeA || outcomeB);
+                const aMismatch = Boolean(
+                  expected && outcomeA && !outcomesMatch(expected, outcomeA),
+                );
+                const bMismatch = Boolean(
+                  expected && outcomeB && !outcomesMatch(expected, outcomeB),
+                );
                 return (
                   <Fragment key={row.queryKey}>
                     <TableRow
                       className={cn(
                         statusDiffers && "bg-destructive/5",
-                        answerDiffers && !statusDiffers && "bg-amber-500/5",
+                        (outcomeDiffers || aMismatch || bMismatch) &&
+                          !statusDiffers &&
+                          "bg-amber-500/5",
+                        answerDiffers &&
+                          !statusDiffers &&
+                          !outcomeDiffers &&
+                          "bg-amber-500/5",
                       )}
                     >
                       <TableCell>
@@ -534,6 +568,30 @@ export function WorkflowTestCompare({ refreshToken, onError }: Props) {
                       <TableCell className="max-w-xs">
                         <p className="truncate text-xs font-medium">{row.groupName}</p>
                         <p className="truncate text-xs text-muted-foreground">{row.query}</p>
+                      </TableCell>
+                      <TableCell>
+                        <Badge variant="outline" className="normal-case">
+                          {categoryTypeLabel(category)}
+                        </Badge>
+                      </TableCell>
+                      <TableCell className="text-xs text-muted-foreground">
+                        {formatOutcomeLabel(expected)}
+                      </TableCell>
+                      <TableCell
+                        className={cn(
+                          "text-xs",
+                          aMismatch ? "text-destructive" : "text-muted-foreground",
+                        )}
+                      >
+                        {formatOutcomeLabel(outcomeA)}
+                      </TableCell>
+                      <TableCell
+                        className={cn(
+                          "text-xs",
+                          bMismatch ? "text-destructive" : "text-muted-foreground",
+                        )}
+                      >
+                        {formatOutcomeLabel(outcomeB)}
                       </TableCell>
                       <TableCell>
                         <Badge variant={statusVariant(row.a?.status)} className="normal-case">
@@ -576,7 +634,7 @@ export function WorkflowTestCompare({ refreshToken, onError }: Props) {
                     </TableRow>
                     {expanded && (
                       <TableRow>
-                        <TableCell colSpan={8} className="bg-muted/10">
+                        <TableCell colSpan={12} className="bg-muted/10">
                           <div className="space-y-4 py-2">
                             <div>
                               <p className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
@@ -695,6 +753,13 @@ function CompareDetail({
   return (
     <div className="space-y-2 text-xs">
       <p className="font-medium text-foreground">Side {side}</p>
+      <p className="text-muted-foreground">
+        Category: {categoryTypeLabel(result.categoryType)}
+        {" · "}
+        Expected: {formatOutcomeLabel(result.expectedOutcome ?? result.expectedResult)}
+        {" · "}
+        Actual: {formatOutcomeLabel(result.actualOutcome)}
+      </p>
       <p className="text-muted-foreground">
         Phase: {result.failurePhase === "none" ? "—" : result.failurePhase}
         {result.failedNode ? ` · node: ${result.failedNode}` : ""}

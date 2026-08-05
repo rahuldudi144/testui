@@ -12,11 +12,11 @@ import {
   resolveKnowledgeDbUri,
 } from "../userDatabase.js";
 import {
-  indexConnectionKnowledge,
-} from "../indexConnectionKnowledge.js";
+  listConnectionKnowledgeDocuments,
+  streamKnowledgeIndexWithPreviewSafe,
+} from "../knowledgeIndexStream.js";
 import { testDatabaseConnection } from "../agent.js";
 import { errorMessage } from "../../../utils/errors.js";
-import { isAbortError } from "../../../utils/abort.js";
 
 type AuthUser = { id: string; username: string; createdAt: Date };
 
@@ -107,6 +107,40 @@ databaseRoutes.post("/preview-schema", async (c) => {
     },
     410,
   );
+});
+
+databaseRoutes.get("/:id/knowledge-documents", async (c) => {
+  const user = c.get("user");
+  const id = c.req.param("id");
+  const tablesParam = c.req.query("tables")?.trim();
+
+  const connection = await prisma.databaseConnection.findFirst({
+    where: { id, userId: user.id },
+  });
+  if (!connection) {
+    return c.json({ error: "Database connection not found." }, 404);
+  }
+
+  try {
+    resolveKnowledgeDbUri(connection);
+  } catch (error) {
+    return c.json({ error: errorMessage(error) }, 400);
+  }
+
+  const tables = tablesParam
+    ? tablesParam.split(",").map((t) => t.trim()).filter(Boolean)
+    : undefined;
+
+  try {
+    const documents = await listConnectionKnowledgeDocuments(
+      id,
+      user.id,
+      tables,
+    );
+    return c.json({ documents });
+  } catch (error) {
+    return c.json({ error: errorMessage(error) }, 500);
+  }
 });
 
 databaseRoutes.get("/:id/schema", async (c) => {
@@ -233,54 +267,17 @@ databaseRoutes.post("/:id/index-knowledge", async (c) => {
   c.header("X-Accel-Buffering", "no");
 
   return streamSSE(c, async (stream) => {
-    const signal = c.req.raw.signal;
-    try {
-      await stream.writeSSE({
-        event: "status",
-        data: JSON.stringify({ message: "indexing" }),
-      });
-
-      await indexConnectionKnowledge(id, user.id, {
-        abortSignal: signal,
-        onEvent: async (event) => {
-          await stream.writeSSE({
-            event: event.type,
-            data: JSON.stringify(event),
-          });
-        },
-      });
-
-      if (signal.aborted) return;
-
-      const connection = await prisma.databaseConnection.findUnique({
-        where: { id },
-      });
-      await stream.writeSSE({
-        event: "done",
-        data: JSON.stringify({
-          database: toPublicDatabase(connection ?? existing),
-        }),
-      });
-    } catch (error) {
-      if (signal.aborted || isAbortError(error)) return;
-      const updated = await prisma.databaseConnection.findUnique({
-        where: { id },
-      });
-      await stream.writeSSE({
-        event: "error",
-        data: JSON.stringify({
-          message: errorMessage(error),
-          database: toPublicDatabase(updated ?? existing),
-        }),
-      });
-    }
+    await streamKnowledgeIndexWithPreviewSafe(
+      stream,
+      id,
+      user.id,
+      c.req.raw.signal,
+    );
   });
 });
 
 /** Backward-compatible alias — redirects to the same indexing flow. */
 databaseRoutes.post("/:id/sync-schema", async (c) => {
-  // Re-enter through index-knowledge by calling the same logic via sub-request is awkward;
-  // duplicate the thin auth check and forward to shared indexing helper above by path rewrite.
   const user = c.get("user");
   const id = c.req.param("id");
 
@@ -302,47 +299,12 @@ databaseRoutes.post("/:id/sync-schema", async (c) => {
   c.header("X-Accel-Buffering", "no");
 
   return streamSSE(c, async (stream) => {
-    const signal = c.req.raw.signal;
-    try {
-      await stream.writeSSE({
-        event: "status",
-        data: JSON.stringify({ message: "indexing" }),
-      });
-
-      await indexConnectionKnowledge(id, user.id, {
-        abortSignal: signal,
-        onEvent: async (event) => {
-          await stream.writeSSE({
-            event: event.type,
-            data: JSON.stringify(event),
-          });
-        },
-      });
-
-      if (signal.aborted) return;
-
-      const connection = await prisma.databaseConnection.findUnique({
-        where: { id },
-      });
-      await stream.writeSSE({
-        event: "done",
-        data: JSON.stringify({
-          database: toPublicDatabase(connection ?? existing),
-        }),
-      });
-    } catch (error) {
-      if (signal.aborted || isAbortError(error)) return;
-      const updated = await prisma.databaseConnection.findUnique({
-        where: { id },
-      });
-      await stream.writeSSE({
-        event: "error",
-        data: JSON.stringify({
-          message: errorMessage(error),
-          database: toPublicDatabase(updated ?? existing),
-        }),
-      });
-    }
+    await streamKnowledgeIndexWithPreviewSafe(
+      stream,
+      id,
+      user.id,
+      c.req.raw.signal,
+    );
   });
 });
 

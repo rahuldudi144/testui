@@ -66,6 +66,11 @@ export async function duplicateWorkflowTestForAgent(
   const manualGroups = source.groups.map((group) => ({
     name: group.name,
     queries: group.queries.map((query) => query.query),
+    categoryType: (group as { categoryType?: string }).categoryType ?? "STANDARD",
+    execution:
+      ((group as { executionOverrides?: unknown }).executionOverrides as
+        | Record<string, unknown>
+        | null) ?? undefined,
   }));
 
   const created = await prisma.workflowTest.create({
@@ -73,6 +78,7 @@ export async function duplicateWorkflowTestForAgent(
       userId,
       name: testName,
       agentProfileId,
+      databaseConnectionId: source.databaseConnectionId,
       suiteKey,
       dryRun: source.dryRun,
       delayMs: source.delayMs,
@@ -99,11 +105,12 @@ export async function upsertWorkflowTest(
   input: {
     testName: string;
     agentProfileId?: string | null;
+    databaseConnectionId?: string | null;
     dryRun: boolean;
     delayMs: number;
     suiteKey?: string | null;
   },
-): Promise<{ id: string; suiteKey: string }> {
+): Promise<{ id: string; suiteKey: string; agentProfileId: string | null }> {
   const existing = await prisma.workflowTest.findFirst({
     where: {
       userId,
@@ -118,11 +125,13 @@ export async function upsertWorkflowTest(
       data: {
         dryRun: input.dryRun,
         delayMs: input.delayMs,
+        databaseConnectionId: input.databaseConnectionId ?? null,
       },
     });
     return {
       id: updated.id,
       suiteKey: updated.suiteKey ?? updated.id,
+      agentProfileId: updated.agentProfileId,
     };
   }
 
@@ -131,6 +140,7 @@ export async function upsertWorkflowTest(
       userId,
       name: input.testName,
       agentProfileId: input.agentProfileId ?? null,
+      databaseConnectionId: input.databaseConnectionId ?? null,
       dryRun: input.dryRun,
       delayMs: input.delayMs,
       suiteKey: input.suiteKey ?? undefined,
@@ -145,13 +155,14 @@ export async function upsertWorkflowTest(
     });
   }
 
-  return { id: created.id, suiteKey };
+  return { id: created.id, suiteKey, agentProfileId: created.agentProfileId };
 }
 
 export function toWorkflowTestSummary(test: {
   id: string;
   name: string;
   agentProfileId: string | null;
+  databaseConnectionId?: string | null;
   suiteKey: string | null;
   dryRun: boolean;
   delayMs: number;
@@ -163,11 +174,17 @@ export function toWorkflowTestSummary(test: {
     llmProvider: string | null;
     modelName: string | null;
   } | null;
+  databaseConnection?: {
+    id: string;
+    name: string;
+    dbType: string;
+  } | null;
 }) {
   return {
     id: test.id,
     name: test.name,
     agentProfileId: test.agentProfileId,
+    databaseConnectionId: test.databaseConnectionId ?? null,
     suiteKey: test.suiteKey,
     dryRun: test.dryRun,
     delayMs: test.delayMs,
@@ -179,6 +196,13 @@ export function toWorkflowTestSummary(test: {
           name: test.agentProfile.name,
           llmProvider: test.agentProfile.llmProvider,
           modelName: test.agentProfile.modelName,
+        }
+      : null,
+    database: test.databaseConnection
+      ? {
+          id: test.databaseConnection.id,
+          name: test.databaseConnection.name,
+          dbType: test.databaseConnection.dbType,
         }
       : null,
   };

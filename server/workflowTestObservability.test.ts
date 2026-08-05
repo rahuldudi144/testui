@@ -6,6 +6,7 @@ import {
   mergeRerunAttempt,
   mergeRerunResults,
   normalizeQueryRunResult,
+  selectFailedItemsForRerun,
 } from "./workflowTestObservability.js";
 import type { QueryRunResult } from "./stressTestAnalyze.js";
 
@@ -125,6 +126,59 @@ describe("mergeRerunResults", () => {
     expect(merged[0]?.executionCount).toBe(2);
     expect(merged[1]?.executionCount).toBe(1);
   });
+
+  test("keeps prior passes and reduces failures across progressive merges", () => {
+    const existing = [
+      normalizeQueryRunResult(
+        enrichWithTokens(makeResult({ query: "keep", status: "pass" }), 1, 1),
+      ),
+      normalizeQueryRunResult(
+        enrichWithTokens(makeResult({ query: "f1", status: "fail" }), 1, 1),
+      ),
+      normalizeQueryRunResult(
+        enrichWithTokens(makeResult({ query: "f2", status: "error" }), 1, 1),
+      ),
+    ];
+
+    const afterFirst = mergeRerunResults(existing, [
+      {
+        queryKey: buildQueryKey("Group A", "f1"),
+        result: makeResult({ query: "f1", status: "pass" }),
+        metrics: {
+          promptTokens: 1,
+          completionTokens: 1,
+          totalTokens: 2,
+          llmCallCount: 1,
+          llmCalls: [],
+        },
+        ranAt: new Date("2025-07-01T12:00:00.000Z"),
+      },
+    ]);
+
+    expect(afterFirst.map((row) => row.status)).toEqual([
+      "pass",
+      "pass",
+      "error",
+    ]);
+
+    const afterCancel = mergeRerunResults(afterFirst, [
+      {
+        queryKey: buildQueryKey("Group A", "f2"),
+        result: makeResult({ query: "f2", status: "pass" }),
+        metrics: {
+          promptTokens: 1,
+          completionTokens: 1,
+          totalTokens: 2,
+          llmCallCount: 1,
+          llmCalls: [],
+        },
+        ranAt: new Date("2025-07-01T12:01:00.000Z"),
+      },
+    ]);
+
+    expect(afterCancel.every((row) => row.status === "pass")).toBe(true);
+    expect(afterCancel[0]?.executionCount).toBe(1);
+  });
 });
 
 describe("augmentSummaryWithObservability", () => {
@@ -155,6 +209,73 @@ describe("augmentSummaryWithObservability", () => {
     expect(summary.promptTokens).toBe(150);
     expect(summary.completionTokens).toBe(60);
     expect(summary.totalTokens).toBe(210);
+  });
+});
+
+describe("selectFailedItemsForRerun", () => {
+  test("returns all fail/error rows when groups are omitted", () => {
+    const results = [
+      normalizeQueryRunResult(makeResult({ query: "ok", status: "pass" })),
+      normalizeQueryRunResult(
+        makeResult({ query: "bad", status: "fail", categoryType: "STANDARD" }),
+      ),
+      normalizeQueryRunResult(
+        makeResult({
+          groupName: "B",
+          query: "err",
+          status: "error",
+          categoryType: "CONVERSATION",
+        }),
+      ),
+    ];
+
+    const selected = selectFailedItemsForRerun(results);
+    expect(selected).toHaveLength(2);
+    expect(selected.map((row) => row.item.query)).toEqual(["bad", "err"]);
+  });
+
+  test("filters and applies Setup group category overrides", () => {
+    const results = [
+      normalizeQueryRunResult(
+        makeResult({
+          groupName: "Orders",
+          query: "list orders",
+          status: "fail",
+          categoryType: "STANDARD",
+        }),
+      ),
+      normalizeQueryRunResult(
+        makeResult({
+          groupName: "Orders",
+          query: "count orders",
+          status: "fail",
+          categoryType: "STANDARD",
+        }),
+      ),
+      normalizeQueryRunResult(
+        makeResult({
+          groupName: "Users",
+          query: "list users",
+          status: "error",
+          categoryType: "STANDARD",
+        }),
+      ),
+    ];
+
+    const selected = selectFailedItemsForRerun(results, {
+      groups: [
+        {
+          name: "Orders",
+          queries: ["list orders"],
+          categoryType: "CONVERSATION",
+        },
+      ],
+    });
+
+    expect(selected).toHaveLength(1);
+    expect(selected[0]?.item.query).toBe("list orders");
+    expect(selected[0]?.override?.categoryType).toBe("CONVERSATION");
+    expect(selected[0]?.override?.execution).toBeNull();
   });
 });
 

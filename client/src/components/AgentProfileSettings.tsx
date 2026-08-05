@@ -68,6 +68,7 @@ export function AgentProfileSettings({ onAgentChange }: Props) {
   const [embeddingModelName, setEmbeddingModelName] = useState("");
   const [embeddingApiKey, setEmbeddingApiKey] = useState("");
   const [embeddingBaseUrl, setEmbeddingBaseUrl] = useState("");
+  const [embeddingDimension, setEmbeddingDimension] = useState("");
 
   const [editName, setEditName] = useState("");
   const [editSystemPrompt, setEditSystemPrompt] = useState("");
@@ -81,6 +82,7 @@ export function AgentProfileSettings({ onAgentChange }: Props) {
   const [editEmbeddingModelName, setEditEmbeddingModelName] = useState("");
   const [editEmbeddingApiKey, setEditEmbeddingApiKey] = useState("");
   const [editEmbeddingBaseUrl, setEditEmbeddingBaseUrl] = useState("");
+  const [editEmbeddingDimension, setEditEmbeddingDimension] = useState("");
 
   useEffect(() => {
     if (!success) return;
@@ -116,6 +118,14 @@ export function AgentProfileSettings({ onAgentChange }: Props) {
     setEmbeddingModelName("");
     setEmbeddingApiKey("");
     setEmbeddingBaseUrl("");
+    setEmbeddingDimension("");
+  }
+
+  function parseDimensionInput(value: string): number | null {
+    const trimmed = value.trim();
+    if (!trimmed) return null;
+    const n = Number(trimmed);
+    return Number.isInteger(n) && n > 0 ? n : null;
   }
 
   async function handleSave(e: React.FormEvent) {
@@ -124,6 +134,12 @@ export function AgentProfileSettings({ onAgentChange }: Props) {
     setError(null);
     setSuccess(null);
     try {
+      if (
+        embeddingDimension.trim() &&
+        parseDimensionInput(embeddingDimension) === null
+      ) {
+        throw new Error("Embedding dimension must be a positive integer.");
+      }
       await createAgentProfile({
         name,
         systemPrompt: systemPrompt.trim() || undefined,
@@ -135,6 +151,7 @@ export function AgentProfileSettings({ onAgentChange }: Props) {
         embeddingModelName: embeddingModelName.trim() || undefined,
         embeddingApiKey: embeddingApiKey.trim() || undefined,
         embeddingBaseUrl: embeddingBaseUrl.trim() || undefined,
+        embeddingDimension: parseDimensionInput(embeddingDimension),
         setActive: true,
       });
       setSuccess("Agent saved and set as active.");
@@ -175,6 +192,9 @@ export function AgentProfileSettings({ onAgentChange }: Props) {
     setEditEmbeddingModelName(agent.embeddingModelName ?? "");
     setEditEmbeddingBaseUrl(agent.embeddingBaseUrl ?? "");
     setEditEmbeddingApiKey("");
+    setEditEmbeddingDimension(
+      agent.embeddingDimension != null ? String(agent.embeddingDimension) : "",
+    );
     setExpandedId(agent.id);
   }
 
@@ -183,6 +203,12 @@ export function AgentProfileSettings({ onAgentChange }: Props) {
     setError(null);
     setSuccess(null);
     try {
+      if (
+        editEmbeddingDimension.trim() &&
+        parseDimensionInput(editEmbeddingDimension) === null
+      ) {
+        throw new Error("Embedding dimension must be a positive integer.");
+      }
       await updateAgentProfile(agent.id, {
         name: editName,
         systemPrompt: editSystemPrompt,
@@ -195,6 +221,7 @@ export function AgentProfileSettings({ onAgentChange }: Props) {
         embeddingModelName: editEmbeddingModelName.trim() || null,
         embeddingBaseUrl: editEmbeddingBaseUrl.trim() || null,
         embeddingApiKey: editEmbeddingApiKey.trim() || undefined,
+        embeddingDimension: parseDimensionInput(editEmbeddingDimension),
       });
       setEditingId(null);
       setSuccess("Agent updated.");
@@ -450,8 +477,7 @@ export function AgentProfileSettings({ onAgentChange }: Props) {
                                 <p className="mt-1 text-xs text-muted-foreground">
                                   Passed to DatabaseAgent as embeddingProvider /
                                   embeddingModelName / embeddingApiKey /
-                                  embeddingBaseUrl (openai, local, ollama,
-                                  gemini).
+                                  embeddingBaseUrl / embeddingDimension.
                                 </p>
                               </div>
                               <AgentLlmFields
@@ -468,6 +494,10 @@ export function AgentProfileSettings({ onAgentChange }: Props) {
                                 onApiKeyChange={setEditEmbeddingApiKey}
                                 baseUrl={editEmbeddingBaseUrl}
                                 onBaseUrlChange={setEditEmbeddingBaseUrl}
+                                embeddingDimension={editEmbeddingDimension}
+                                onEmbeddingDimensionChange={
+                                  setEditEmbeddingDimension
+                                }
                                 hasStoredApiKey={agent.hasEmbeddingApiKey}
                                 labels={EMBEDDING_LABELS}
                                 allowEmptyProvider
@@ -556,6 +586,15 @@ export function AgentProfileSettings({ onAgentChange }: Props) {
                               </div>
                               <div>
                                 <dt className="text-xs font-medium text-muted-foreground">
+                                  Embedding dimension
+                                </dt>
+                                <dd className="text-sm text-foreground">
+                                  {agent.embeddingDimension ??
+                                    "Derived from model"}
+                                </dd>
+                              </div>
+                              <div>
+                                <dt className="text-xs font-medium text-muted-foreground">
                                   Embedding API key
                                 </dt>
                                 <dd className="text-sm text-foreground">
@@ -631,9 +670,11 @@ export function AgentProfileSettings({ onAgentChange }: Props) {
                   <code className="text-[0.7rem]">embeddingProvider</code>,{" "}
                   <code className="text-[0.7rem]">embeddingModelName</code>,{" "}
                   <code className="text-[0.7rem]">embeddingApiKey</code>,{" "}
-                  <code className="text-[0.7rem]">embeddingBaseUrl</code>. Leave
-                  empty to use server defaults (
-                  <code className="text-[0.7rem]">openai</code> + chat key).
+                  <code className="text-[0.7rem]">embeddingBaseUrl</code>,{" "}
+                  <code className="text-[0.7rem]">embeddingDimension</code>.
+                  Leave empty to use server defaults (
+                  <code className="text-[0.7rem]">openai</code> + chat key;
+                  dimension from model).
                 </p>
               </div>
               <AgentLlmFields
@@ -648,6 +689,8 @@ export function AgentProfileSettings({ onAgentChange }: Props) {
                 onApiKeyChange={setEmbeddingApiKey}
                 baseUrl={embeddingBaseUrl}
                 onBaseUrlChange={setEmbeddingBaseUrl}
+                embeddingDimension={embeddingDimension}
+                onEmbeddingDimensionChange={setEmbeddingDimension}
                 labels={EMBEDDING_LABELS}
                 allowEmptyProvider
                 embeddingMode

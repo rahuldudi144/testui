@@ -1,6 +1,13 @@
+import type {
+  ExecutionPolicyOverrides,
+  WorkflowTestCategoryType,
+} from "./workflowTestCategory";
+
 export interface StressTestGroupInput {
   name: string;
   queriesText: string;
+  categoryType?: WorkflowTestCategoryType;
+  execution?: ExecutionPolicyOverrides;
 }
 
 export function parseQueries(text: string): string[] {
@@ -27,11 +34,15 @@ export function countQueriesInGroups(groups: StressTestGroupInput[]): number {
 export function toApiGroups(groups: StressTestGroupInput[]): Array<{
   name: string;
   queries: string[];
+  categoryType?: WorkflowTestCategoryType;
+  execution?: ExecutionPolicyOverrides;
 }> {
   return groups
     .map((group) => ({
       name: group.name.trim(),
       queries: parseQueries(group.queriesText),
+      categoryType: group.categoryType,
+      execution: group.execution,
     }))
-    .filter((group) => group.name && group.queries.length > 0);
+    .filter((group) => Boolean(group.name));
 }

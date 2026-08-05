@@ -27,6 +27,7 @@ interface AgentEmbeddingBody {
   embeddingModelName?: string | null;
   embeddingApiKey?: string | null;
   embeddingBaseUrl?: string | null;
+  embeddingDimension?: number | string | null;
 }
 
 function trimToNull(value?: string | null): string | null {
@@ -89,6 +90,7 @@ function resolveEmbeddingFields(
     embeddingModelName?: string | null;
     embeddingApiKey?: string | null;
     embeddingBaseUrl?: string | null;
+    embeddingDimension?: number | null;
     apiKey?: string | null;
   },
 ): {
@@ -96,6 +98,7 @@ function resolveEmbeddingFields(
   embeddingProvider: string | null;
   embeddingModelName: string | null;
   embeddingBaseUrl: string | null;
+  embeddingDimension: number | null;
 } {
   const embeddingProvider =
     body.embeddingProvider !== undefined
@@ -113,6 +116,7 @@ function resolveEmbeddingFields(
       embeddingProvider: null,
       embeddingModelName: null,
       embeddingBaseUrl: null,
+      embeddingDimension: null,
     };
   }
 
@@ -125,12 +129,18 @@ function resolveEmbeddingFields(
       ? trimToNull(body.embeddingBaseUrl)
       : existing?.embeddingBaseUrl ?? null;
 
+  const dimensionInput =
+    body.embeddingDimension !== undefined
+      ? body.embeddingDimension
+      : existing?.embeddingDimension ?? null;
+
   const validation = validateAgentEmbeddingFields({
     embeddingProvider,
     embeddingModelName,
     embeddingApiKey: body.embeddingApiKey,
     storedEmbeddingApiKey: existing?.embeddingApiKey,
     embeddingBaseUrl,
+    embeddingDimension: dimensionInput,
     chatApiKey: body.apiKey,
     storedChatApiKey: existing?.apiKey,
   });
@@ -141,10 +151,22 @@ function resolveEmbeddingFields(
       embeddingProvider: validation.provider,
       embeddingModelName,
       embeddingBaseUrl,
+      embeddingDimension: null,
     };
   }
 
-  return { embeddingProvider, embeddingModelName, embeddingBaseUrl };
+  // Explicit null/empty in body clears stored dimension.
+  const embeddingDimension =
+    body.embeddingDimension !== undefined
+      ? (validation.embeddingDimension ?? null)
+      : existing?.embeddingDimension ?? null;
+
+  return {
+    embeddingProvider,
+    embeddingModelName,
+    embeddingBaseUrl,
+    embeddingDimension,
+  };
 }
 
 export const agentRoutes = new Hono<{ Variables: { user: AuthUser } }>();
@@ -210,6 +232,7 @@ agentRoutes.post("/", async (c) => {
       embeddingModelName: embeddingFields.embeddingModelName,
       embeddingApiKey: trimToNull(body.embeddingApiKey),
       embeddingBaseUrl: embeddingFields.embeddingBaseUrl,
+      embeddingDimension: embeddingFields.embeddingDimension,
     },
   });
 
@@ -273,6 +296,7 @@ agentRoutes.patch("/:id", async (c) => {
       embeddingModelName: embeddingFields.embeddingModelName,
       embeddingBaseUrl: embeddingFields.embeddingBaseUrl,
       embeddingApiKey,
+      embeddingDimension: embeddingFields.embeddingDimension,
     },
   });
 

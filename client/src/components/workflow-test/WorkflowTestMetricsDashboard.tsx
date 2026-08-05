@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { memo, useEffect, useMemo, useState, useTransition } from "react";
 import {
   Bar,
   BarChart,
@@ -15,10 +15,13 @@ import {
 import type { WorkflowTestCompletePayload } from "../../api";
 import {
   buildCompareMetrics,
+  buildLightweightRunMetrics,
   buildRunMetrics,
   type CompareMetrics,
   type RunMetrics,
 } from "../../lib/workflowTestMetrics";
+import { categoryTypeLabel, formatOutcomeLabel } from "../../lib/workflowTestReportHelpers";
+import { Button } from "../ui/Button";
 import { InspectSection } from "./InspectBlocks";
 
 const CHART_COLORS = {
@@ -26,11 +29,17 @@ const CHART_COLORS = {
   failed: "hsl(0 84% 60%)",
   errors: "hsl(0 72% 50%)",
   plannerSkipped: "hsl(215 16% 47%)",
+  matched: "hsl(142 76% 36%)",
+  mismatched: "hsl(38 92% 50%)",
   primary: "hsl(var(--primary))",
   muted: "hsl(var(--muted-foreground))",
   secondary: "hsl(217 91% 60%)",
   accent: "hsl(38 92% 50%)",
 };
+
+/** Above this, charts stay collapsed until the user asks for them. */
+const LARGE_REPORT_CHART_THRESHOLD = 80;
+const DASHBOARD_PER_QUERY_LIMIT = 48;
 
 function formatNumber(value: number): string {
   return value.toLocaleString();
@@ -108,7 +117,11 @@ function OverviewCards({
   );
 }
 
-function OutcomesChart({ metrics }: { metrics: RunMetrics }) {
+const StatusBreakdownChart = memo(function StatusBreakdownChart({
+  metrics,
+}: {
+  metrics: RunMetrics;
+}) {
   const data = [
     { name: "Passed", value: metrics.statusBreakdown.passed, fill: CHART_COLORS.passed },
     { name: "Failed", value: metrics.statusBreakdown.failed, fill: CHART_COLORS.failed },
@@ -121,7 +134,7 @@ function OutcomesChart({ metrics }: { metrics: RunMetrics }) {
   ].filter((entry) => entry.value > 0);
 
   if (data.length === 0) {
-    return <p className="text-xs text-muted-foreground">No outcome data.</p>;
+    return <p className="text-xs text-muted-foreground">No status data.</p>;
   }
 
   return (
@@ -146,7 +159,106 @@ function OutcomesChart({ metrics }: { metrics: RunMetrics }) {
       </PieChart>
     </ResponsiveContainer>
   );
-}
+});
+
+const OutcomeAlignmentChart = memo(function OutcomeAlignmentChart({
+  metrics,
+}: {
+  metrics: RunMetrics;
+}) {
+  const { matched, mismatched, errors } = metrics.outcomeAlignment;
+  const data = [
+    { name: "Matched", value: matched, fill: CHART_COLORS.matched },
+    { name: "Mismatched", value: mismatched, fill: CHART_COLORS.mismatched },
+    { name: "Errors", value: errors, fill: CHART_COLORS.errors },
+  ].filter((entry) => entry.value > 0);
+
+  if (data.length === 0) {
+    return <p className="text-xs text-muted-foreground">No outcome alignment data.</p>;
+  }
+
+  return (
+    <ResponsiveContainer width="100%" height={220}>
+      <PieChart>
+        <Pie
+          data={data}
+          dataKey="value"
+          nameKey="name"
+          cx="50%"
+          cy="50%"
+          innerRadius={50}
+          outerRadius={80}
+          paddingAngle={2}
+        >
+          {data.map((entry) => (
+            <Cell key={entry.name} fill={entry.fill} />
+          ))}
+        </Pie>
+        <Tooltip />
+        <Legend />
+      </PieChart>
+    </ResponsiveContainer>
+  );
+});
+
+const ByCategoryChart = memo(function ByCategoryChart({
+  metrics,
+}: {
+  metrics: RunMetrics;
+}) {
+  const data = metrics.byCategory.map((group) => ({
+    name: categoryTypeLabel(group.categoryType),
+    passed: group.passed,
+    failed: group.failed + group.errors,
+    skipped: group.plannerSkipped,
+  }));
+
+  if (data.length === 0) {
+    return <p className="text-xs text-muted-foreground">No category data.</p>;
+  }
+
+  return (
+    <ResponsiveContainer width="100%" height={Math.max(180, data.length * 36)}>
+      <BarChart data={data} layout="vertical" margin={{ left: 8, right: 8 }}>
+        <CartesianGrid strokeDasharray="3 3" className="stroke-border/50" />
+        <XAxis type="number" tick={{ fontSize: 11 }} />
+        <YAxis type="category" dataKey="name" width={110} tick={{ fontSize: 11 }} />
+        <Tooltip />
+        <Legend />
+        <Bar dataKey="passed" stackId="a" fill={CHART_COLORS.passed} name="Passed" />
+        <Bar dataKey="failed" stackId="a" fill={CHART_COLORS.failed} name="Failed / errors" />
+        <Bar dataKey="skipped" stackId="a" fill={CHART_COLORS.plannerSkipped} name="Planner skip" />
+      </BarChart>
+    </ResponsiveContainer>
+  );
+});
+
+const ByActualOutcomeChart = memo(function ByActualOutcomeChart({
+  metrics,
+}: {
+  metrics: RunMetrics;
+}) {
+  const data = metrics.byActualOutcome.map((entry) => ({
+    name: formatOutcomeLabel(entry.outcome),
+    count: entry.count,
+  }));
+
+  if (data.length === 0) {
+    return <p className="text-xs text-muted-foreground">No actual outcome data.</p>;
+  }
+
+  return (
+    <ResponsiveContainer width="100%" height={220}>
+      <BarChart data={data}>
+        <CartesianGrid strokeDasharray="3 3" className="stroke-border/50" />
+        <XAxis dataKey="name" tick={{ fontSize: 10 }} />
+        <YAxis tick={{ fontSize: 11 }} />
+        <Tooltip />
+        <Bar dataKey="count" fill={CHART_COLORS.secondary} name="Count" />
+      </BarChart>
+    </ResponsiveContainer>
+  );
+});
 
 function ByGroupChart({ metrics }: { metrics: RunMetrics }) {
   const data = metrics.byGroup.map((group) => ({
@@ -423,67 +535,127 @@ interface CompareProps {
 type Props = SingleProps | CompareProps;
 
 export function WorkflowTestMetricsDashboard(props: Props) {
-  const metrics = useMemo(() => {
-    if (props.mode === "compare") return props.compare.a;
-    return buildRunMetrics(props.report);
-  }, [props]);
+  const isCompare = props.mode === "compare";
+  const resultCount = isCompare
+    ? props.compare.a.overview.totalQueries
+    : props.report.results.length;
+  const reportRunId = isCompare ? null : props.report.runId;
+  const deferChartsByDefault =
+    !isCompare && resultCount >= LARGE_REPORT_CHART_THRESHOLD;
 
-  const compare = props.mode === "compare" ? props.compare : undefined;
+  const [chartsOpen, setChartsOpen] = useState(!deferChartsByDefault);
+  const [pending, startTransition] = useTransition();
+
+  useEffect(() => {
+    setChartsOpen(isCompare || resultCount < LARGE_REPORT_CHART_THRESHOLD);
+  }, [isCompare, resultCount, reportRunId]);
+
+  const metrics = useMemo(() => {
+    if (isCompare) return props.compare.a;
+    if (!chartsOpen) return buildLightweightRunMetrics(props.report);
+    return buildRunMetrics(props.report, {
+      perQueryLimit: DASHBOARD_PER_QUERY_LIMIT,
+    });
+  }, [props, isCompare, chartsOpen]);
+
+  const compare = isCompare ? props.compare : undefined;
 
   return (
     <div className="space-y-6">
       <InspectSection title="Metrics overview">
         <OverviewCards metrics={metrics} compare={compare} />
+        {!isCompare && (
+          <div className="mt-3 flex flex-wrap items-center gap-2">
+            <Button
+              type="button"
+              size="sm"
+              variant="secondary"
+              loading={pending}
+              onClick={() => {
+                startTransition(() => {
+                  setChartsOpen((open) => !open);
+                });
+              }}
+            >
+              {chartsOpen ? "Hide charts" : "Show charts"}
+            </Button>
+            {!chartsOpen && deferChartsByDefault && (
+              <p className="text-xs text-muted-foreground">
+                Charts deferred for this large report ({resultCount} queries).
+              </p>
+            )}
+          </div>
+        )}
       </InspectSection>
 
-      {compare && (
-        <InspectSection title="Head-to-head comparison">
-          <CompareHeadToHead compare={compare} />
-        </InspectSection>
-      )}
+      {chartsOpen && (
+        <>
+          {compare && (
+            <InspectSection title="Head-to-head comparison">
+              <CompareHeadToHead compare={compare} />
+            </InspectSection>
+          )}
 
-      <div className="grid gap-6 lg:grid-cols-2">
-        <InspectSection title="Outcomes">
-          <OutcomesChart metrics={metrics} />
-        </InspectSection>
+          <div className="grid gap-6 lg:grid-cols-2">
+            <InspectSection title="Status breakdown">
+              <StatusBreakdownChart metrics={metrics} />
+            </InspectSection>
 
-        <InspectSection title="Token usage">
-          <TokenUsageChart metrics={metrics} />
-        </InspectSection>
-      </div>
+            <InspectSection title="Outcome alignment">
+              <OutcomeAlignmentChart metrics={metrics} />
+            </InspectSection>
+          </div>
 
-      <InspectSection title="By group">
-        <ByGroupChart metrics={metrics} />
-      </InspectSection>
+          <div className="grid gap-6 lg:grid-cols-2">
+            <InspectSection title="By category">
+              <ByCategoryChart metrics={metrics} />
+            </InspectSection>
 
-      {metrics.byPhase.length > 0 && (
-        <InspectSection title="Failure phases">
-          <ByPhaseChart metrics={metrics} />
-        </InspectSection>
-      )}
+            <InspectSection title="Actual outcomes">
+              <ByActualOutcomeChart metrics={metrics} />
+            </InspectSection>
+          </div>
 
-      <div className="grid gap-6 lg:grid-cols-2">
-        <InspectSection title="Per-query duration">
-          <PerQueryChart metrics={metrics} metric="durationMs" />
-        </InspectSection>
-        <InspectSection title="Per-query tokens">
-          <PerQueryChart metrics={metrics} metric="totalTokens" />
-        </InspectSection>
-      </div>
+          <div className="grid gap-6 lg:grid-cols-2">
+            <InspectSection title="Token usage">
+              <TokenUsageChart metrics={metrics} />
+            </InspectSection>
 
-      <div className="grid gap-6 lg:grid-cols-2">
-        <InspectSection title="LLM calls by node">
-          <LlmByNodeChart metrics={metrics} />
-        </InspectSection>
-        <InspectSection title="Rerun attempts">
-          <AttemptsChart metrics={metrics} />
-        </InspectSection>
-      </div>
+            <InspectSection title="By group">
+              <ByGroupChart metrics={metrics} />
+            </InspectSection>
+          </div>
 
-      {compare && (
-        <InspectSection title="Per-query deltas (overlapping queries)">
-          <ComparePerQueryDelta compare={compare} />
-        </InspectSection>
+          {metrics.byPhase.length > 0 && (
+            <InspectSection title="Failure phases">
+              <ByPhaseChart metrics={metrics} />
+            </InspectSection>
+          )}
+
+          <div className="grid gap-6 lg:grid-cols-2">
+            <InspectSection title="Per-query duration">
+              <PerQueryChart metrics={metrics} metric="durationMs" />
+            </InspectSection>
+            <InspectSection title="Per-query tokens">
+              <PerQueryChart metrics={metrics} metric="totalTokens" />
+            </InspectSection>
+          </div>
+
+          <div className="grid gap-6 lg:grid-cols-2">
+            <InspectSection title="LLM calls by node">
+              <LlmByNodeChart metrics={metrics} />
+            </InspectSection>
+            <InspectSection title="Rerun attempts">
+              <AttemptsChart metrics={metrics} />
+            </InspectSection>
+          </div>
+
+          {compare && (
+            <InspectSection title="Per-query deltas (overlapping queries)">
+              <ComparePerQueryDelta compare={compare} />
+            </InspectSection>
+          )}
+        </>
       )}
     </div>
   );

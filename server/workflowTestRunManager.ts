@@ -141,6 +141,29 @@ export function waitForRunEnd(runId: string): Promise<void> {
   return ensureEndPromise(entry);
 }
 
+/** Sleep that resolves early when the abort signal fires. */
+export function abortableDelay(
+  ms: number,
+  signal?: AbortSignal,
+): Promise<void> {
+  if (ms <= 0) return Promise.resolve();
+  if (signal?.aborted) return Promise.resolve();
+
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+
+    const onAbort = () => {
+      clearTimeout(timer);
+      resolve();
+    };
+
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
 export function createActivityEmitterForRun(
   runId: string,
   stream: { writeSSE: (message: RunStreamEvent) => Promise<void> },

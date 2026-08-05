@@ -1,5 +1,12 @@
 import { useEffect, useState } from "react";
 import type { QueryRunResult } from "../../api";
+import { formatDurationEstimate } from "../../lib/workflowTestEta";
+import {
+  categoryTypeLabel,
+  formatOutcomeLabel,
+  isFatalAbortMessage,
+} from "../../lib/workflowTestReportHelpers";
+import { Alert } from "../ui/Alert";
 import { Badge } from "../ui/Badge";
 import { Button } from "../ui/Button";
 import { LiveFlaskIcon } from "./LiveFlaskIcon";
@@ -12,6 +19,9 @@ interface Props {
   queryIndex: number;
   totalQueries: number;
   completedQueries?: number;
+  estimatedRemainingMs?: number;
+  categoryType?: string;
+  expectedOutcome?: string;
   latestActivity?: string | null;
   activityLog?: string[];
   liveResults?: QueryRunResult[];
@@ -34,18 +44,7 @@ function statusVariant(
   return "outline";
 }
 
-export function WorkflowTestProgress({
-  testName,
-  groupName,
-  query,
-  queryIndex,
-  totalQueries,
-  completedQueries = 0,
-  latestActivity,
-  activityLog = [],
-  liveResults = [],
-  onCancel,
-}: Props) {
+function ElapsedTime() {
   const [startedAt] = useState(() => Date.now());
   const [elapsedMs, setElapsedMs] = useState(0);
 
@@ -56,10 +55,32 @@ export function WorkflowTestProgress({
     return () => window.clearInterval(timer);
   }, [startedAt]);
 
+  return <span>{formatElapsed(elapsedMs)}</span>;
+}
+
+export function WorkflowTestProgress({
+  testName,
+  groupName,
+  query,
+  queryIndex,
+  totalQueries,
+  completedQueries = 0,
+  estimatedRemainingMs,
+  categoryType,
+  expectedOutcome,
+  latestActivity,
+  activityLog = [],
+  liveResults = [],
+  onCancel,
+}: Props) {
   const inFlight = queryIndex > completedQueries;
   const completedPct =
     totalQueries > 0 ? Math.round((completedQueries / totalQueries) * 100) : 0;
   const showCompletedPct = !inFlight || completedQueries > 0;
+  const fatalAbort =
+    (latestActivity && isFatalAbortMessage(latestActivity) ? latestActivity : null) ??
+    liveResults.find((r) => isFatalAbortMessage(r.errorMessage))?.errorMessage ??
+    null;
 
   return (
     <div className="space-y-4 rounded-lg border border-border bg-card/60 p-4">
@@ -75,6 +96,12 @@ export function WorkflowTestProgress({
         </Button>
       </div>
 
+      {fatalAbort && (
+        <Alert variant="error">
+          Run aborted due to a fatal provider error: {fatalAbort}
+        </Alert>
+      )}
+
       <div className="space-y-2">
         <div className="flex flex-wrap justify-between gap-2 text-xs text-muted-foreground">
           <span>
@@ -84,11 +111,14 @@ export function WorkflowTestProgress({
               : ""}
           </span>
           <span>
-            {formatElapsed(elapsedMs)}
+            <ElapsedTime />
             {totalQueries > 0
               ? showCompletedPct
                 ? ` · ${completedPct}%`
                 : " · in progress"
+              : ""}
+            {estimatedRemainingMs !== undefined
+              ? ` · ${formatDurationEstimate(estimatedRemainingMs)} remaining`
               : ""}
           </span>
         </div>
@@ -99,10 +129,24 @@ export function WorkflowTestProgress({
         />
       </div>
 
-      {groupName && (
-        <p className="text-xs text-muted-foreground">
-          Group: <span className="font-medium text-foreground">{groupName}</span>
-        </p>
+      {(groupName || categoryType || expectedOutcome) && (
+        <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+          {groupName && (
+            <span>
+              Group: <span className="font-medium text-foreground">{groupName}</span>
+            </span>
+          )}
+          {categoryType && (
+            <Badge variant="info" className="normal-case">
+              {categoryTypeLabel(categoryType)}
+            </Badge>
+          )}
+          {expectedOutcome && (
+            <Badge variant="outline" className="normal-case">
+              Expected: {formatOutcomeLabel(expectedOutcome)}
+            </Badge>
+          )}
+        </div>
       )}
       {query && (
         <p className="rounded-md border border-border bg-background px-3 py-2 font-mono text-xs text-foreground">
@@ -120,7 +164,7 @@ export function WorkflowTestProgress({
       {liveResults.length > 0 && (
         <div className="space-y-2">
           <p className="text-xs font-medium text-muted-foreground">
-            Completed results ({liveResults.length})
+            Recent results ({liveResults.length})
           </p>
           <div className="flex flex-wrap gap-1.5">
             {liveResults.slice(-8).map((result, index) => (
@@ -130,7 +174,9 @@ export function WorkflowTestProgress({
                 className="max-w-full truncate normal-case"
                 title={result.query}
               >
-                {result.status}
+                {result.actualOutcome
+                  ? formatOutcomeLabel(result.actualOutcome)
+                  : result.status}
               </Badge>
             ))}
           </div>

@@ -1,6 +1,11 @@
 import type { InvokeResult } from "../../types/index.js";
 import type { StateHistoryEntry } from "../../types/index.js";
 import { AgentError, errorMessage } from "../../utils/errors.js";
+import {
+  legacyStatusToOutcome,
+  scoreAgainstExpected,
+  type WorkflowExpectedOutcome,
+} from "./workflowTestCategory.js";
 
 export type StressRunStatus = "pass" | "fail" | "error" | "planner_skip";
 
@@ -41,6 +46,15 @@ export interface QueryRunResult {
   completionTokens?: number;
   totalTokens?: number;
   executionCount?: number;
+  categoryType?: string;
+  expectedOutcome?: string;
+  /** @deprecated Prefer expectedOutcome */
+  expectedResult?: string;
+  actualOutcome?: string;
+  /** Snapshot of resolved execution policy at run time. */
+  history?: "RESET" | "KEEP";
+  stopOnFailure?: boolean;
+  timeoutMs?: number;
 }
 
 export type WorkflowRunStatus =
@@ -54,6 +68,14 @@ export interface PlannedQueryItem {
   query: string;
 }
 
+export interface CategorySummaryStats {
+  total: number;
+  passed: number;
+  failed: number;
+  errors: number;
+  plannerSkipped: number;
+}
+
 export interface StressTestSummary {
   total: number;
   passed: number;
@@ -65,6 +87,9 @@ export interface StressTestSummary {
     string,
     { total: number; passed: number; failed: number; errors: number; plannerSkipped: number }
   >;
+  byCategory?: Record<string, CategorySummaryStats>;
+  outcomeMatched?: number;
+  outcomeMismatched?: number;
   executionCount?: number;
   promptTokens?: number;
   completionTokens?: number;
@@ -405,6 +430,36 @@ function detectFailurePhase(params: {
   return "none";
 }
 
+function applyExpectedPolicy(
+  runResult: QueryRunResult,
+  expectedOutcome?: WorkflowExpectedOutcome | string,
+): QueryRunResult {
+  if (!expectedOutcome) return runResult;
+
+  const actualOutcome =
+    runResult.actualOutcome ??
+    legacyStatusToOutcome(runResult.status);
+
+  const scored = scoreAgainstExpected({
+    expectedOutcome: expectedOutcome as WorkflowExpectedOutcome,
+    actualOutcome,
+    errored: Boolean(runResult.errorMessage) || runResult.status === "error",
+  });
+
+  const normalizedExpected =
+    typeof expectedOutcome === "string"
+      ? expectedOutcome.toUpperCase()
+      : String(expectedOutcome);
+
+  return {
+    ...runResult,
+    expectedOutcome: normalizedExpected,
+    expectedResult: normalizedExpected.toLowerCase(),
+    actualOutcome,
+    status: scored,
+  };
+}
+
 export function analyzeStressRunResult(params: {
   query: string;
   groupName: string;
@@ -414,6 +469,13 @@ export function analyzeStressRunResult(params: {
   dryRun?: boolean;
   errorMessage?: string;
   requestId?: string;
+  categoryType?: string;
+  expectedOutcome?: WorkflowExpectedOutcome;
+  /** @deprecated Prefer expectedOutcome */
+  expectedResult?: string;
+  history?: "RESET" | "KEEP";
+  stopOnFailure?: boolean;
+  timeoutMs?: number;
 }): QueryRunResult {
   const {
     query,
@@ -424,7 +486,19 @@ export function analyzeStressRunResult(params: {
     dryRun = false,
     errorMessage,
     requestId,
+    categoryType,
+    expectedOutcome,
+    expectedResult,
+    history,
+    stopOnFailure,
+    timeoutMs,
   } = params;
+
+  const resolvedExpected =
+    expectedOutcome ??
+    (expectedResult
+      ? (expectedResult.toUpperCase() as WorkflowExpectedOutcome)
+      : undefined);
 
   const base: QueryRunResult = {
     groupName,
@@ -436,6 +510,15 @@ export function analyzeStressRunResult(params: {
     markdownPreview: result?.markdownResponse?.slice(0, 240),
     markdownResponse: result?.markdownResponse,
     generatedSql: result?.generatedSql ?? null,
+    categoryType,
+    expectedOutcome: resolvedExpected,
+    expectedResult: resolvedExpected
+      ? resolvedExpected.toLowerCase()
+      : undefined,
+    actualOutcome: result?.outcome,
+    history,
+    stopOnFailure,
+    timeoutMs,
   };
 
   if (errorMessage) {
@@ -459,22 +542,25 @@ export function analyzeStressRunResult(params: {
     const failedNode = findFailedNode(graphNodes, metricsTimeline);
     const failurePhase = failurePhaseForNode(failedNode);
 
-    return attachFailureDetails(
-      {
-        ...base,
-        status: "error",
-        failurePhase,
-        errorMessage,
-        workflowPath: path.length > 0 ? path : undefined,
-        workflowStatus: workflow.status,
-      },
-      {
-        failedNode,
-        failurePhase,
-        path,
-        graphNodes,
-        history,
-      },
+    return applyExpectedPolicy(
+      attachFailureDetails(
+        {
+          ...base,
+          status: "error",
+          failurePhase,
+          errorMessage,
+          workflowPath: path.length > 0 ? path : undefined,
+          workflowStatus: workflow.status,
+        },
+        {
+          failedNode,
+          failurePhase,
+          path,
+          graphNodes,
+          history,
+        },
+      ),
+      resolvedExpected,
     );
   }
 
@@ -482,24 +568,24 @@ export function analyzeStressRunResult(params: {
   const workflow = (asRecord(debugRecord?.workflow) ?? {}) as WorkflowSummary;
   const graph = asRecord(debugRecord?.graph);
   const metrics = asRecord(debugRecord?.metrics);
-  const history = parseStateHistory(debugRecord?.stateHistory);
+  const stateHistory = parseStateHistory(debugRecord?.stateHistory);
 
   const graphNodes = Array.isArray(graph?.nodes)
     ? (graph.nodes as GraphNodeSummary[])
     : [];
   const path = Array.isArray(graph?.path)
     ? (graph.path as string[]).map(normalizeNodeId)
-    : history.map((e) => normalizeNodeId(e.node));
+    : stateHistory.map((e) => normalizeNodeId(e.node));
 
   const metricsTimeline = Array.isArray(metrics?.nodeTimeline)
     ? (metrics.nodeTimeline as Array<{ node?: string; event?: string }>)
     : [];
 
-  const executionOk = executionSucceeded(history, result);
+  const executionOk = executionSucceeded(stateHistory, result);
   const failurePhase = detectFailurePhase({
     workflow,
     path,
-    history,
+    history: stateHistory,
     dryRun,
     executionOk,
   });
@@ -510,7 +596,7 @@ export function analyzeStressRunResult(params: {
     failurePhase,
     path,
     graphNodes,
-    history,
+    history: stateHistory,
     invokeResult: result,
   };
 
@@ -518,22 +604,26 @@ export function analyzeStressRunResult(params: {
     workflow.requiresSql === false || workflow.isDomainSpecific === false;
 
   if (skippedSqlPath) {
-    return attachFailureDetails(
-      {
-        ...base,
-        status: "planner_skip",
-        failurePhase: "planner",
-        workflowPath: path,
-        workflowStatus: workflow.status,
-      },
-      { ...detailParams, failurePhase: "planner" },
+    return applyExpectedPolicy(
+      attachFailureDetails(
+        {
+          ...base,
+          status: "planner_skip",
+          failurePhase: "planner",
+          workflowPath: path,
+          workflowStatus: workflow.status,
+          actualOutcome: base.actualOutcome ?? "planner_skip",
+        },
+        { ...detailParams, failurePhase: "planner" },
+      ),
+      resolvedExpected,
     );
   }
 
   const validationFailed = workflow.validationPassed === false;
   const traceFailed = workflow.status === "failed";
   const executionFailed = !dryRun && executionOk === false;
-  const formatFailed = Boolean(formatResponseFailed(history));
+  const formatFailed = Boolean(formatResponseFailed(stateHistory));
 
   const passed =
     !traceFailed &&
@@ -548,24 +638,37 @@ export function analyzeStressRunResult(params: {
       ? "query_build"
       : failurePhase;
 
-  return attachFailureDetails(
-    {
-      ...base,
-      status: passed ? "pass" : "fail",
-      failurePhase: resolvedPhase,
-      workflowPath: path,
-      workflowStatus: workflow.status,
-      generatedSql:
-        result?.generatedSql ??
-        (typeof debugRecord?.output === "object"
-          ? ((debugRecord?.output as Record<string, unknown>).generatedSql as
-              | string
-              | null
-              | undefined)
-          : null) ??
-        null,
-    },
-    { ...detailParams, failurePhase: resolvedPhase },
+  const heuristicStatus = passed ? "pass" : "fail";
+  const heuristicOutcome =
+    base.actualOutcome ??
+    (passed
+      ? "success"
+      : resolvedPhase === "execution"
+        ? "execution_failure"
+        : "validation_failure");
+
+  return applyExpectedPolicy(
+    attachFailureDetails(
+      {
+        ...base,
+        status: heuristicStatus,
+        failurePhase: resolvedPhase,
+        workflowPath: path,
+        workflowStatus: workflow.status,
+        actualOutcome: heuristicOutcome,
+        generatedSql:
+          result?.generatedSql ??
+          (typeof debugRecord?.output === "object"
+            ? ((debugRecord?.output as Record<string, unknown>).generatedSql as
+                | string
+                | null
+                | undefined)
+            : null) ??
+          null,
+      },
+      { ...detailParams, failurePhase: resolvedPhase },
+    ),
+    resolvedExpected,
   );
 }
 
@@ -580,6 +683,9 @@ export function buildStressTestSummary(
     plannerSkipped: 0,
     byPhase: {},
     byGroup: {},
+    byCategory: {},
+    outcomeMatched: 0,
+    outcomeMismatched: 0,
   };
 
   let executionCount = 0;
@@ -619,6 +725,31 @@ export function buildStressTestSummary(
     }
 
     summary.byGroup[result.groupName] = groupStats;
+
+    const categoryKey = result.categoryType ?? "STANDARD";
+    const categoryStats = summary.byCategory![categoryKey] ?? {
+      total: 0,
+      passed: 0,
+      failed: 0,
+      errors: 0,
+      plannerSkipped: 0,
+    };
+    categoryStats.total += 1;
+    if (result.status === "pass") categoryStats.passed += 1;
+    else if (result.status === "error") categoryStats.errors += 1;
+    else if (result.status === "planner_skip") categoryStats.plannerSkipped += 1;
+    else categoryStats.failed += 1;
+    summary.byCategory![categoryKey] = categoryStats;
+
+    if (result.status !== "error" && result.expectedOutcome) {
+      const scored = scoreAgainstExpected({
+        expectedOutcome: result.expectedOutcome as WorkflowExpectedOutcome,
+        actualOutcome: result.actualOutcome,
+        errored: false,
+      });
+      if (scored === "pass") summary.outcomeMatched! += 1;
+      else summary.outcomeMismatched! += 1;
+    }
 
     executionCount += result.executionCount ?? result.attempts?.length ?? 1;
     promptTokens += result.promptTokens ?? 0;

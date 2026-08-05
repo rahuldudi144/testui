@@ -30,6 +30,9 @@ interface Props {
   onApiKeyChange: (value: string) => void;
   baseUrl: string;
   onBaseUrlChange: (value: string) => void;
+  /** Embedding vector size override (embedding mode only). */
+  embeddingDimension?: string;
+  onEmbeddingDimensionChange?: (value: string) => void;
   hasStoredApiKey?: boolean;
   disabled?: boolean;
   /** Defaults to chat LLM labels. */
@@ -63,6 +66,8 @@ export function AgentLlmFields({
   onApiKeyChange,
   baseUrl,
   onBaseUrlChange,
+  embeddingDimension = "",
+  onEmbeddingDimensionChange,
   hasStoredApiKey,
   disabled,
   labels,
@@ -92,76 +97,98 @@ export function AgentLlmFields({
             value={provider}
             disabled={disabled}
             onChange={(e) => onProviderChange(e.target.value)}
-        >
-          {allowEmptyProvider && (
-            <option value="">{emptyProviderLabel}</option>
-          )}
-          {embeddingOptions.map((option) => (
-            <option key={option.value} value={option.value}>
-              {option.label}
-            </option>
-          ))}
-        </select>
-      </FormField>
+          >
+            {allowEmptyProvider && (
+              <option value="">{emptyProviderLabel}</option>
+            )}
+            {embeddingOptions.map((option) => (
+              <option key={option.value} value={option.value}>
+                {option.label}
+              </option>
+            ))}
+          </select>
+        </FormField>
 
-      {provider ? (
-        <>
-          <FormField>
-            <Label htmlFor={`${idPrefix}-model`}>
-              {resolvedLabels.model}
-            </Label>
-            <Input
-              id={`${idPrefix}-model`}
-              value={modelName}
-              disabled={disabled}
-              placeholder={embeddingModelPlaceholder(
-                provider as EmbeddingProvider,
-              )}
-              onChange={(e) => onModelNameChange(e.target.value)}
-            />
-          </FormField>
-
-          {showApiKey && (
+        {provider ? (
+          <>
             <FormField>
-              <Label htmlFor={`${idPrefix}-api-key`}>
-                {resolvedLabels.apiKey}
+              <Label htmlFor={`${idPrefix}-model`}>
+                {resolvedLabels.model}
               </Label>
               <Input
-                id={`${idPrefix}-api-key`}
-                type="password"
-                value={apiKey}
+                id={`${idPrefix}-model`}
+                value={modelName}
                 disabled={disabled}
-                placeholder={
-                  hasStoredApiKey
-                    ? "Leave blank to keep existing key"
-                    : "Optional — falls back to chat API key"
-                }
-                onChange={(e) => onApiKeyChange(e.target.value)}
+                placeholder={embeddingModelPlaceholder(
+                  provider as EmbeddingProvider,
+                )}
+                onChange={(e) => onModelNameChange(e.target.value)}
               />
             </FormField>
-          )}
 
-          {provider !== "gemini" && (
-            <FormField>
-              <Label htmlFor={`${idPrefix}-base-url`}>{baseUrlMeta.label}</Label>
-              <Input
-                id={`${idPrefix}-base-url`}
-                value={baseUrl}
-                disabled={disabled}
-                placeholder={baseUrlMeta.placeholder}
-                onChange={(e) => onBaseUrlChange(e.target.value)}
-              />
-              {baseUrlMeta.hint && (
-                <p className="mt-1 text-xs text-muted-foreground">
-                  {baseUrlMeta.hint}
-                </p>
-              )}
-            </FormField>
-          )}
-        </>
-      ) : null}
-    </div>
-  );
+            {showApiKey && (
+              <FormField>
+                <Label htmlFor={`${idPrefix}-api-key`}>
+                  {resolvedLabels.apiKey}
+                </Label>
+                <Input
+                  id={`${idPrefix}-api-key`}
+                  type="password"
+                  value={apiKey}
+                  disabled={disabled}
+                  placeholder={
+                    hasStoredApiKey
+                      ? "Leave blank to keep existing key"
+                      : "Optional — falls back to chat API key"
+                  }
+                  onChange={(e) => onApiKeyChange(e.target.value)}
+                />
+              </FormField>
+            )}
+
+            {provider !== "gemini" && (
+              <FormField>
+                <Label htmlFor={`${idPrefix}-base-url`}>
+                  {baseUrlMeta.label}
+                </Label>
+                <Input
+                  id={`${idPrefix}-base-url`}
+                  value={baseUrl}
+                  disabled={disabled}
+                  placeholder={baseUrlMeta.placeholder}
+                  onChange={(e) => onBaseUrlChange(e.target.value)}
+                />
+                {baseUrlMeta.hint && (
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    {baseUrlMeta.hint}
+                  </p>
+                )}
+              </FormField>
+            )}
+          </>
+        ) : null}
+
+        <FormField>
+          <Label htmlFor={`${idPrefix}-dimension`}>Embedding dimension</Label>
+          <Input
+            id={`${idPrefix}-dimension`}
+            type="number"
+            min={1}
+            step={1}
+            inputMode="numeric"
+            value={embeddingDimension}
+            disabled={disabled}
+            placeholder="e.g. 1536, 3072, 768"
+            onChange={(e) => onEmbeddingDimensionChange?.(e.target.value)}
+          />
+          <p className="mt-1 text-xs text-muted-foreground">
+            Optional pgvector size. Leave empty to derive from the model
+            (text-embedding-3-small → 1536, text-embedding-3-large → 3072,
+            text-embedding-004 → 768). Must match the knowledge DB column.
+          </p>
+        </FormField>
+      </div>
+    );
   }
 
   const options = listProviderOptions();

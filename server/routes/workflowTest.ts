@@ -9,14 +9,30 @@ import {
   type WorkflowTestGroupRecord,
 } from "../parseStressQueries.js";
 import {
+  analyzeStressRunResult,
   buildStressTestSummary,
   type PlannedQueryItem,
   type QueryRunResult,
 } from "../stressTestAnalyze.js";
 import {
-  getActiveDatabaseForUser,
   parseDbHost,
+  resolveDatabaseForWorkflowTest,
 } from "../userDatabase.js";
+import {
+  expectedOutcomeToAgentOutcome,
+  resolveExecution,
+  resolveRerunItemPolicy,
+  type ExecutionPolicyOverrides,
+  type WorkflowExpectedOutcome,
+  type WorkflowTestCategoryType,
+} from "../workflowTestCategory.js";
+import {
+  DEFAULT_AVG_QUERY_MS,
+  estimateRemainingMs,
+  estimateTotalMs,
+  resolveAvgQueryMs,
+} from "../workflowTestEta.js";
+import type { Message } from "../../../types/index.js";
 import {
   duplicateWorkflowTestForAgent,
   toWorkflowTestSummary,
@@ -29,18 +45,25 @@ import {
   importFailuresFromRun,
   loadTestGroups,
   saveManualGroups,
+  updateFailuresGroupPolicy,
 } from "../workflowTestGroups.js";
 import { authMiddleware } from "./auth.js";
-import { errorMessage } from "../../../utils/errors.js";
+import {
+  errorMessage,
+  formatFatalProviderStopMessage,
+  isFatalProviderError,
+} from "../../../utils/errors.js";
 import { isAbortError } from "../../../utils/abort.js";
 import { extractMetricsFromDebug } from "../extractRunMetrics.js";
 import {
-  collectFailedForRerun,
+  enrichQueryRunResult,
   mergeRerunResults,
   normalizeQueryRunResult,
   normalizeRunReport,
   parseStoredResults,
   parseStoredSummary,
+  selectFailedItemsForRerun,
+  type RerunSetupGroup,
   type WorkflowTestReportPayload,
 } from "../workflowTestObservability.js";
 import {
@@ -51,10 +74,13 @@ import {
   buildWorkflowRunSummary,
   checkpointWorkflowRun,
   collectRemainingItems,
+  finalizeOrphanedRunningRun,
   parsePlannedItems,
+  resolveWatchPlannedTotal,
   type WorkflowRunCheckpointState,
 } from "../workflowTestRunPersistence.js";
 import {
+  abortableDelay,
   cancelActiveRun,
   createActivityEmitterForRun,
   findActiveRunIdForUser,
@@ -72,11 +98,93 @@ import {
 type AuthUser = { id: string; username: string; createdAt: Date };
 
 const STREAM_KEEPALIVE_MS = 5_000;
+const EMPTY_METRICS = {
+  promptTokens: 0,
+  completionTokens: 0,
+  totalTokens: 0,
+  llmCallCount: 0,
+  llmCalls: [],
+};
 
 type WorkflowStream = {
   writeSSE: (message: { event: string; data: string }) => Promise<void>;
   onAbort: (listener: () => void) => void;
 };
+
+async function loadAvgQueryMsForTest(
+  userId: string,
+  testId: string,
+  suiteKey?: string | null,
+): Promise<number> {
+  const lastRun = await prisma.workflowTestRun.findFirst({
+    where: { userId, workflowTestId: testId },
+    orderBy: { ranAt: "desc" },
+    select: { results: true },
+  });
+
+  const lastDurations = extractDurationsFromResults(lastRun?.results);
+
+  let suiteDurations: number[] = [];
+  if (suiteKey) {
+    const suiteRuns = await prisma.workflowTestRun.findMany({
+      where: {
+        userId,
+        workflowTest: { suiteKey },
+      },
+      orderBy: { ranAt: "desc" },
+      take: 5,
+      select: { results: true },
+    });
+    suiteDurations = suiteRuns.flatMap((run) =>
+      extractDurationsFromResults(run.results),
+    );
+  }
+
+  return resolveAvgQueryMs({
+    lastRunDurations: lastDurations,
+    suiteDurations,
+    defaultMs: DEFAULT_AVG_QUERY_MS,
+  });
+}
+
+function extractDurationsFromResults(results: unknown): number[] {
+  if (!Array.isArray(results)) return [];
+  return results
+    .map((row) =>
+      row && typeof row === "object" && typeof (row as { durationMs?: unknown }).durationMs === "number"
+        ? (row as { durationMs: number }).durationMs
+        : null,
+    )
+    .filter((n): n is number => n != null && n >= 0);
+}
+
+/** Attach category metadata from saved groups onto planned/remaining items. */
+function enrichItemsWithCategory(
+  items: Array<{ groupName: string; query: string }>,
+  groups: WorkflowTestGroupRecord[],
+): Array<{
+  groupId: string;
+  groupName: string;
+  query: string;
+  categoryType: WorkflowTestCategoryType;
+  executionOverrides: import("../workflowTestCategory.js").ExecutionPolicyOverrides | null;
+}> {
+  const byKey = new Map<string, WorkflowTestGroupRecord>();
+  for (const group of groups) {
+    byKey.set(group.name, group);
+  }
+
+  return items.map((item) => {
+    const group = byKey.get(item.groupName);
+    return {
+      groupId: group?.id ?? item.groupName,
+      groupName: item.groupName,
+      query: item.query,
+      categoryType: group?.categoryType ?? "STANDARD",
+      executionOverrides: group?.executionOverrides ?? null,
+    };
+  });
+}
 
 export const workflowTestRoutes = new Hono<{ Variables: { user: AuthUser } }>();
 
@@ -91,12 +199,15 @@ interface RunWorkflowTestOptions {
   dryRun: boolean;
   delayMs: number;
   agentProfileId?: string | null;
+  databaseConnectionId?: string | null;
 }
 
 interface QueryLoopContext {
   userId: string;
   dbType: "postgres" | "mysql";
-  activeDb: NonNullable<Awaited<ReturnType<typeof getActiveDatabaseForUser>>>;
+  activeDb: NonNullable<
+    Awaited<ReturnType<typeof resolveDatabaseForWorkflowTest>>
+  >;
   dbInfo: { dbType: string; name: string; host: string };
   agentConfig: {
     provider: string;
@@ -107,6 +218,7 @@ interface QueryLoopContext {
   runnerOptions: ReturnType<typeof profileAgentConfig>;
   dryRun: boolean;
   delayMs: number;
+  avgQueryMs: number;
   onActivity: (message: string) => void;
   abortSignal: AbortSignal;
 }
@@ -161,7 +273,13 @@ async function emitWorkflowRunComplete(
 }
 
 async function runWorkflowQueryItems(
-  items: Array<{ groupName: string; query: string }>,
+  items: Array<{
+    groupId: string;
+    groupName: string;
+    query: string;
+    categoryType: WorkflowTestCategoryType;
+    executionOverrides: import("../workflowTestCategory.js").ExecutionPolicyOverrides | null;
+  }>,
   options: {
     stream: WorkflowStream;
     runId: string;
@@ -189,6 +307,12 @@ async function runWorkflowQueryItems(
     reportFields,
   } = options;
 
+  const estimatedTotalMs = estimateTotalMs({
+    queryCount: plannedTotal,
+    avgQueryMs: queryContext.avgQueryMs,
+    delayMs: queryContext.delayMs,
+  });
+
   await safeWriteSSE(stream, runId, {
     event: "start",
     data: JSON.stringify({
@@ -197,8 +321,13 @@ async function runWorkflowQueryItems(
       overallTotalQueries: plannedTotal,
       completedQueries: progressOffset,
       runId: checkpoint.runId,
+      estimatedTotalMs,
     }),
   });
+
+  let historyMessages: Message[] = [];
+  let currentGroupId: string | null = null;
+  const completedDurations: number[] = [];
 
   for (let index = 0; index < items.length; index += 1) {
     if (abort.isAborted()) {
@@ -219,8 +348,35 @@ async function runWorkflowQueryItems(
       return "cancelled";
     }
 
-    const { groupName, query } = items[index]!;
+    const item = items[index]!;
+    const { groupId, groupName, query, categoryType, executionOverrides } = item;
+    const policy = resolveExecution(categoryType, executionOverrides);
+
+    if (currentGroupId !== groupId) {
+      currentGroupId = groupId;
+      historyMessages = [];
+    }
+
+    const messagesForInvoke =
+      policy.history === "KEEP" ? [...historyMessages] : [];
+
+    const itemDryRun = queryContext.dryRun;
+    const itemDelayMs = queryContext.delayMs;
+
     const displayIndex = progressOffset + index + 1;
+    const remainingQueries = plannedTotal - (displayIndex - 1);
+    const rollingAvg =
+      completedDurations.length > 0
+        ? Math.round(
+            completedDurations.reduce((a, b) => a + b, 0) /
+              completedDurations.length,
+          )
+        : queryContext.avgQueryMs;
+    const estimatedRemainingMs = estimateRemainingMs({
+      remainingQueries,
+      rollingAvgMs: rollingAvg,
+      delayMs: itemDelayMs,
+    });
 
     await safeWriteSSE(stream, runId, {
       event: "progress",
@@ -229,6 +385,11 @@ async function runWorkflowQueryItems(
         queryIndex: displayIndex,
         totalQueries: plannedTotal,
         query,
+        categoryType,
+        expectedOutcome: policy.expectedOutcome,
+        expectedResult: expectedOutcomeToAgentOutcome(policy.expectedOutcome),
+        estimatedRemainingMs,
+        estimatedTotalMs,
       }),
     });
     queryContext.onActivity(
@@ -253,10 +414,98 @@ async function runWorkflowQueryItems(
       return "cancelled";
     }
 
-    const { result: runResult } = await executeQueryItem(
-      { groupName, query },
-      queryContext,
+    const timeoutSignal =
+      typeof policy.timeoutMs === "number" && policy.timeoutMs > 0
+        ? AbortSignal.timeout(policy.timeoutMs)
+        : undefined;
+    const itemAbortSignal = combineAbortSignals(
+      queryContext.abortSignal,
+      timeoutSignal,
     );
+
+    let runResult: QueryRunResult;
+    try {
+      const executed = await executeQueryItem(
+        {
+          groupName,
+          query,
+          categoryType,
+          expectedOutcome: policy.expectedOutcome,
+          messages: messagesForInvoke,
+          history: policy.history,
+          stopOnFailure: policy.stopOnFailure,
+          timeoutMs: policy.timeoutMs,
+        },
+        { ...queryContext, dryRun: itemDryRun, abortSignal: itemAbortSignal },
+      );
+      runResult = executed.result;
+    } catch (err) {
+      if (isAbortError(err) && queryContext.abortSignal.aborted) {
+        throw err;
+      }
+      if (isAbortError(err)) {
+        runResult = enrichQueryRunResult(
+          analyzeStressRunResult({
+            query,
+            groupName,
+            durationMs: policy.timeoutMs ?? 0,
+            dryRun: itemDryRun,
+            errorMessage: `Query timed out after ${policy.timeoutMs ?? "?"}ms`,
+            categoryType,
+            expectedOutcome: policy.expectedOutcome,
+            history: policy.history,
+            stopOnFailure: policy.stopOnFailure,
+            timeoutMs: policy.timeoutMs,
+          }),
+          EMPTY_METRICS,
+          new Date(),
+        );
+      } else {
+        throw err;
+      }
+    }
+
+    completedDurations.push(runResult.durationMs);
+
+    const fatalError =
+      runResult.status === "error" && runResult.errorMessage
+        ? new Error(runResult.errorMessage)
+        : null;
+    if (fatalError && isFatalProviderError(fatalError)) {
+      checkpoint.results.push(runResult);
+      await checkpointWorkflowRun(checkpoint, "partial", {
+        dryRun: queryContext.dryRun,
+        delayMs: queryContext.delayMs,
+      });
+      await safeWriteSSE(stream, runId, {
+        event: "error",
+        data: JSON.stringify({
+          message: formatFatalProviderStopMessage(fatalError),
+        }),
+      });
+      await emitWorkflowRunComplete(stream, runId, {
+        ...reportFields,
+        summary: buildWorkflowRunSummary(
+          checkpoint.results,
+          checkpoint.plannedItems.length,
+          "partial",
+          checkpoint.plannedItems,
+        ),
+        results: checkpoint.results,
+      });
+      return "partial";
+    }
+
+    if (policy.history === "KEEP") {
+      historyMessages = [
+        ...historyMessages,
+        { role: "user", content: query },
+        {
+          role: "assistant",
+          content: runResult.markdownResponse ?? runResult.markdownPreview ?? "",
+        },
+      ];
+    }
 
     if (abort.isAborted()) {
       checkpoint.results.push(runResult);
@@ -296,10 +545,24 @@ async function runWorkflowQueryItems(
       data: JSON.stringify(runResult),
     });
 
-    if (queryContext.delayMs > 0 && index < items.length - 1) {
-      await new Promise((resolve) =>
-        setTimeout(resolve, queryContext.delayMs),
+    if (
+      policy.stopOnFailure &&
+      (runResult.status === "fail" || runResult.status === "error")
+    ) {
+      queryContext.onActivity(
+        `Stopping group "${groupName}" after failure (stopOnFailure).`,
       );
+      // Skip remaining queries in this group only
+      while (
+        index + 1 < items.length &&
+        items[index + 1]!.groupId === groupId
+      ) {
+        index += 1;
+      }
+    }
+
+    if (itemDelayMs > 0 && index < items.length - 1) {
+      await abortableDelay(itemDelayMs, queryContext.abortSignal);
     }
   }
 
@@ -331,10 +594,37 @@ async function executeWorkflowTestRun(
   options: RunWorkflowTestOptions,
   stream: WorkflowStream,
 ): Promise<void> {
-  const { userId, testId, testName, groups, groupIds, dryRun, delayMs, agentProfileId } =
-    options;
+  const {
+    userId,
+    testId,
+    testName,
+    groups,
+    groupIds,
+    dryRun,
+    delayMs,
+    agentProfileId,
+    databaseConnectionId,
+  } = options;
 
-  const activeDb = await getActiveDatabaseForUser(userId);
+  const testRow = await prisma.workflowTest.findFirst({
+    where: { id: testId, userId },
+    select: { databaseConnectionId: true, suiteKey: true },
+  });
+
+  let activeDb: Awaited<ReturnType<typeof resolveDatabaseForWorkflowTest>>;
+  try {
+    activeDb = await resolveDatabaseForWorkflowTest(userId, {
+      databaseConnectionId,
+      testDatabaseConnectionId: testRow?.databaseConnectionId,
+    });
+  } catch (error) {
+    await stream.writeSSE({
+      event: "error",
+      data: JSON.stringify({ message: errorMessage(error) }),
+    });
+    return;
+  }
+
   if (!activeDb) {
     await stream.writeSSE({
       event: "error",
@@ -387,6 +677,7 @@ async function executeWorkflowTestRun(
     maxValidationRetries: env.DB_AGENT_MAX_VALIDATION_RETRIES,
   };
 
+  const avgQueryMs = await loadAvgQueryMsForTest(userId, testId, testRow?.suiteKey);
   const plannedItems: PlannedQueryItem[] = items.map(({ groupName, query }) => ({
     groupName,
     query,
@@ -416,6 +707,8 @@ async function executeWorkflowTestRun(
   });
 
   registerActiveRun(savedRun.id, userId);
+  // Do not cancel on SSE disconnect — refresh must be able to reattach via /watch.
+  // Explicit Cancel uses POST /runs/:runId/cancel.
   const abort = getRunAbort(savedRun.id)!;
   const runStream = wrapStreamForRun(savedRun.id, stream);
   const emitActivity = createActivityEmitter(stream, savedRun.id);
@@ -429,6 +722,7 @@ async function executeWorkflowTestRun(
     runnerOptions,
     dryRun,
     delayMs,
+    avgQueryMs,
     onActivity: emitActivity,
     abortSignal: abort.signal,
   };
@@ -493,7 +787,15 @@ async function executeResumeWorkflowTestRun(
 ): Promise<void> {
   const existingRun = await prisma.workflowTestRun.findFirst({
     where: { id: runId, userId },
-    include: { workflowTest: { select: { agentProfileId: true } } },
+    include: {
+      workflowTest: {
+        select: {
+          agentProfileId: true,
+          databaseConnectionId: true,
+          suiteKey: true,
+        },
+      },
+    },
   });
 
   if (!existingRun) {
@@ -531,7 +833,19 @@ async function executeResumeWorkflowTestRun(
     return;
   }
 
-  const activeDb = await getActiveDatabaseForUser(userId);
+  let activeDb: Awaited<ReturnType<typeof resolveDatabaseForWorkflowTest>>;
+  try {
+    activeDb = await resolveDatabaseForWorkflowTest(userId, {
+      testDatabaseConnectionId: existingRun.workflowTest.databaseConnectionId,
+    });
+  } catch (error) {
+    await stream.writeSSE({
+      event: "error",
+      data: JSON.stringify({ message: errorMessage(error) }),
+    });
+    return;
+  }
+
   if (!activeDb) {
     await stream.writeSSE({
       event: "error",
@@ -575,7 +889,16 @@ async function executeResumeWorkflowTestRun(
     maxValidationRetries: env.DB_AGENT_MAX_VALIDATION_RETRIES,
   };
 
+  const avgQueryMs = await loadAvgQueryMsForTest(
+    userId,
+    existingRun.workflowTestId,
+    existingRun.workflowTest.suiteKey,
+  );
+  const groups = await loadTestGroups(existingRun.workflowTestId);
+  const remainingItems = enrichItemsWithCategory(remaining, groups);
+
   registerActiveRun(runId, userId);
+  // Do not cancel on SSE disconnect — refresh reattaches via /watch.
   const abort = getRunAbort(runId)!;
   const runStream = wrapStreamForRun(runId, stream);
   const emitActivity = createActivityEmitter(stream, runId);
@@ -588,6 +911,7 @@ async function executeResumeWorkflowTestRun(
     runnerOptions,
     dryRun,
     delayMs,
+    avgQueryMs,
     onActivity: emitActivity,
     abortSignal: abort.signal,
   };
@@ -614,7 +938,7 @@ async function executeResumeWorkflowTestRun(
   };
 
   try {
-    await runWorkflowQueryItems(remaining, {
+    await runWorkflowQueryItems(remainingItems, {
       stream: runStream,
       runId,
       abort,
@@ -655,11 +979,26 @@ async function executeRerunFailuresInRun(
   runId: string,
   userId: string,
   stream: WorkflowStream,
-  options?: { dryRun?: boolean; delayMs?: number },
+  options?: {
+    dryRun?: boolean;
+    delayMs?: number;
+    agentProfileId?: string | null;
+    categoryType?: string;
+    execution?: ExecutionPolicyOverrides | null;
+    groups?: RerunSetupGroup[];
+  },
 ): Promise<void> {
   const existingRun = await prisma.workflowTestRun.findFirst({
     where: { id: runId, userId },
-    include: { workflowTest: { select: { agentProfileId: true } } },
+    include: {
+      workflowTest: {
+        select: {
+          agentProfileId: true,
+          databaseConnectionId: true,
+          suiteKey: true,
+        },
+      },
+    },
   });
 
   if (!existingRun) {
@@ -673,9 +1012,13 @@ async function executeRerunFailuresInRun(
   const existingResults = parseStoredResults(existingRun.results).map(
     normalizeQueryRunResult,
   );
-  const failedItems = collectFailedForRerun(existingResults);
+  const failedSelections = selectFailedItemsForRerun(existingResults, {
+    groups: options?.groups,
+    categoryType: options?.categoryType,
+    execution: options?.execution,
+  });
 
-  if (failedItems.length === 0) {
+  if (failedSelections.length === 0) {
     await stream.writeSSE({
       event: "error",
       data: JSON.stringify({
@@ -685,7 +1028,19 @@ async function executeRerunFailuresInRun(
     return;
   }
 
-  const activeDb = await getActiveDatabaseForUser(userId);
+  let activeDb: Awaited<ReturnType<typeof resolveDatabaseForWorkflowTest>>;
+  try {
+    activeDb = await resolveDatabaseForWorkflowTest(userId, {
+      testDatabaseConnectionId: existingRun.workflowTest.databaseConnectionId,
+    });
+  } catch (error) {
+    await stream.writeSSE({
+      event: "error",
+      data: JSON.stringify({ message: errorMessage(error) }),
+    });
+    return;
+  }
+
   if (!activeDb) {
     await stream.writeSSE({
       event: "error",
@@ -697,15 +1052,20 @@ async function executeRerunFailuresInRun(
     return;
   }
 
+  const requestedAgentId = options?.agentProfileId?.trim() || null;
   const resolvedAgent = await resolveWorkflowTestAgent(
     userId,
-    existingRun.agentProfileId ?? existingRun.workflowTest.agentProfileId,
+    requestedAgentId ??
+      existingRun.agentProfileId ??
+      existingRun.workflowTest.agentProfileId,
   );
   if (!resolvedAgent) {
     await stream.writeSSE({
       event: "error",
       data: JSON.stringify({
-        message: "No agent profile configured for this test run.",
+        message: requestedAgentId
+          ? "Selected agent profile was not found."
+          : "No agent profile configured for this test run.",
       }),
     });
     return;
@@ -717,11 +1077,6 @@ async function executeRerunFailuresInRun(
   const delayMs = Math.max(0, options?.delayMs ?? existingRun.delayMs);
 
   const dbType = activeDb.dbType as "postgres" | "mysql";
-  const dbInfo = existingRun.database as {
-    dbType: string;
-    name: string;
-    host: string;
-  };
 
   const env = loadEnv();
   const agentConfig = {
@@ -731,20 +1086,28 @@ async function executeRerunFailuresInRun(
     maxValidationRetries: env.DB_AGENT_MAX_VALIDATION_RETRIES,
   };
 
+  const avgQueryMs = await loadAvgQueryMsForTest(
+    userId,
+    existingRun.workflowTestId,
+    existingRun.workflowTest.suiteKey,
+  );
+
   registerActiveRun(runId, userId);
+  // Do not cancel on SSE disconnect — refresh reattaches via /watch.
   const abort = getRunAbort(runId)!;
   const runStream = wrapStreamForRun(runId, stream);
   const emitActivity = createActivityEmitter(stream, runId);
 
+  const dbInfo = {
+    dbType: activeDb.dbType,
+    name: activeDb.name,
+    host: parseDbHost(activeDb.dbUri),
+  };
   const queryContext = {
     userId,
     dbType,
     activeDb,
-    dbInfo: {
-      dbType: activeDb.dbType,
-      name: activeDb.name,
-      host: parseDbHost(activeDb.dbUri),
-    },
+    dbInfo,
     agentConfig,
     runnerOptions,
     dryRun,
@@ -760,15 +1123,41 @@ async function executeRerunFailuresInRun(
   );
 
   try {
+  const plannedItems = parsePlannedItems(existingRun.summary);
+  const plannedCount =
+    plannedItems.length > 0 ? plannedItems.length : existingResults.length;
+  const passedBeforeRerun = existingResults.filter(
+    (result) => result.status === "pass",
+  ).length;
+
+  await prisma.workflowTestRun.update({
+    where: { id: runId },
+    data: {
+      agentProfileId: resolvedAgent.agent.id,
+      agent: resolvedAgent.snapshot as unknown as Prisma.InputJsonValue,
+      summary: buildWorkflowRunSummary(
+        existingResults,
+        plannedCount,
+        "running",
+        plannedItems.length > 0 ? plannedItems : undefined,
+      ) as unknown as Prisma.InputJsonValue,
+      results: existingResults as unknown as Prisma.InputJsonValue,
+    },
+  });
+
   await safeWriteSSE(stream, runId, {
     event: "start",
     data: JSON.stringify({
       testName: existingRun.testName,
       testId: existingRun.workflowTestId,
-      totalQueries: failedItems.length,
+      totalQueries: failedSelections.length,
+      overallTotalQueries: plannedCount,
+      completedQueries: 0,
       dryRun,
       runId,
       rerun: true,
+      resume: true,
+      passedPreserved: passedBeforeRerun,
     }),
   });
 
@@ -779,10 +1168,19 @@ async function executeRerunFailuresInRun(
     ranAt: Date;
   }> = [];
   let workingResults = existingResults;
-  const plannedItems = parsePlannedItems(existingRun.summary);
+
+  const syncPreviousExecutionCounts = () => {
+    for (const result of workingResults) {
+      const key = result.queryKey ?? `${result.groupName}::${result.query}`;
+      previousExecutionCounts.set(
+        key,
+        result.executionCount ?? result.attempts?.length ?? 1,
+      );
+    }
+  };
 
   const persistRerunState = async (
-    runStatus: "completed" | "partial" | "cancelled",
+    runStatus: "running" | "completed" | "partial" | "cancelled",
   ) => {
     const summary =
       plannedItems.length > 0
@@ -792,7 +1190,11 @@ async function executeRerunFailuresInRun(
             runStatus,
             plannedItems,
           )
-        : buildStressTestSummary(workingResults);
+        : {
+            ...buildStressTestSummary(workingResults),
+            runStatus,
+            plannedQueries: plannedCount,
+          };
 
     await prisma.workflowTestRun.update({
       where: { id: runId },
@@ -810,6 +1212,7 @@ async function executeRerunFailuresInRun(
       workingResults,
       previousExecutionCounts,
     );
+    syncPreviousExecutionCounts();
   };
 
   const emitRerunComplete = async (
@@ -823,7 +1226,11 @@ async function executeRerunFailuresInRun(
             runStatus,
             plannedItems,
           )
-        : buildStressTestSummary(workingResults);
+        : {
+            ...buildStressTestSummary(workingResults),
+            runStatus,
+            plannedQueries: plannedCount,
+          };
 
     const report = normalizeRunReport({
       testId: existingRun.workflowTestId,
@@ -833,24 +1240,18 @@ async function executeRerunFailuresInRun(
       delayMs,
       database: dbInfo,
       ranAt: existingRun.ranAt.toISOString(),
-      agent:
-        (existingRun.agent as {
-          id: string;
-          name: string;
-          llmProvider: string | null;
-          modelName: string | null;
-        } | null) ?? resolvedAgent.snapshot,
+      agent: resolvedAgent.snapshot,
       summary,
       results: workingResults,
     });
 
-    await stream.writeSSE({
+    await safeWriteSSE(stream, runId, {
       event: "complete",
       data: JSON.stringify(report),
     });
   };
 
-  for (let index = 0; index < failedItems.length; index += 1) {
+  for (let index = 0; index < failedSelections.length; index += 1) {
     if (abort.isAborted()) {
       if (reruns.length > 0) {
         await persistRerunState("cancelled");
@@ -859,37 +1260,61 @@ async function executeRerunFailuresInRun(
       return;
     }
 
-    const item = failedItems[index]!;
+    const selection = failedSelections[index]!;
+    const item = selection.item;
     const queryKey = item.queryKey!;
+    const policy = resolveRerunItemPolicy(item, selection.override);
 
-    await stream.writeSSE({
+    await safeWriteSSE(stream, runId, {
       event: "progress",
       data: JSON.stringify({
         groupName: item.groupName,
         queryIndex: index + 1,
-        totalQueries: failedItems.length,
+        totalQueries: failedSelections.length,
         query: item.query,
+        categoryType: policy.categoryType,
+        expectedOutcome: policy.expectedOutcome,
       }),
     });
-    emitActivity(`Query ${index + 1} of ${failedItems.length} started`);
+    emitActivity(`Query ${index + 1} of ${failedSelections.length} started`);
 
     if (abort.isAborted()) {
-      await persistRerunState("cancelled");
-      await emitRerunComplete("cancelled");
+      if (reruns.length > 0) {
+        await persistRerunState("cancelled");
+        await emitRerunComplete("cancelled");
+      }
       return;
     }
 
     const { result, metrics, ranAt } = await executeQueryItem(
-      { groupName: item.groupName, query: item.query },
+      {
+        groupName: item.groupName,
+        query: item.query,
+        categoryType: policy.categoryType,
+        expectedOutcome: policy.expectedOutcome,
+        history: policy.history,
+        stopOnFailure: policy.stopOnFailure,
+        timeoutMs: policy.timeoutMs,
+      },
       queryContext,
     );
 
+    reruns.push({ queryKey, result, metrics, ranAt });
+    workingResults = mergeRerunResults(workingResults, [
+      { queryKey, result, metrics, ranAt },
+    ]);
+
+    // Checkpoint after every merge so cancel/reconnect keeps newly passed rows.
+    await persistRerunState(abort.isAborted() ? "cancelled" : "running");
+
+    const mergedPreview = workingResults.find((row) => row.queryKey === queryKey);
+
+    await safeWriteSSE(stream, runId, {
+      event: "result",
+      data: JSON.stringify(mergedPreview ?? result),
+    });
+
     if (abort.isAborted()) {
-      reruns.push({ queryKey, result, metrics, ranAt });
-      workingResults = mergeRerunResults(workingResults, [
-        { queryKey, result, metrics, ranAt },
-      ]);
-      await persistRerunState("cancelled");
       await emitRerunComplete("cancelled");
       return;
     }
@@ -899,24 +1324,27 @@ async function executeRerunFailuresInRun(
       emitActivity(`Query ${index + 1} failed${nodeLabel} — continuing`);
     }
 
-    reruns.push({ queryKey, result, metrics, ranAt });
-    workingResults = mergeRerunResults(workingResults, [
-      { queryKey, result, metrics, ranAt },
-    ]);
+    const fatalError =
+      result.status === "error" && result.errorMessage
+        ? new Error(result.errorMessage)
+        : null;
+    if (fatalError && isFatalProviderError(fatalError)) {
+      await persistRerunState("partial");
+      await safeWriteSSE(stream, runId, {
+        event: "error",
+        data: JSON.stringify({
+          message: formatFatalProviderStopMessage(fatalError),
+        }),
+      });
+      await emitRerunComplete("partial");
+      return;
+    }
 
-    const mergedPreview = workingResults.find((row) => row.queryKey === queryKey);
-
-    await safeWriteSSE(stream, runId, {
-      event: "result",
-      data: JSON.stringify(mergedPreview ?? result),
-    });
-
-    if (delayMs > 0 && index < failedItems.length - 1) {
-      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    if (delayMs > 0 && index < failedSelections.length - 1) {
+      await abortableDelay(delayMs, abort.signal);
     }
   }
 
-  const mergedResults = workingResults;
   await persistRerunState("completed");
   await emitRerunComplete("completed");
   } finally {
@@ -930,10 +1358,12 @@ async function findDbActiveRunForUser(userId: string) {
     orderBy: { ranAt: "desc" },
     take: 30,
   });
-  return (
-    runs.find((run) => parseStoredSummary(run.summary).runStatus === "running") ??
-    null
-  );
+  for (const run of runs) {
+    if (parseStoredSummary(run.summary).runStatus !== "running") continue;
+    if (isRunActive(run.id)) return run;
+    await finalizeOrphanedRunningRun(run.id, userId);
+  }
+  return null;
 }
 
 async function executeWatchWorkflowTestRun(
@@ -941,6 +1371,7 @@ async function executeWatchWorkflowTestRun(
   userId: string,
   stream: WorkflowStream,
 ): Promise<void> {
+  const healed = await finalizeOrphanedRunningRun(runId, userId);
   const run = await prisma.workflowTestRun.findFirst({
     where: { id: runId, userId },
   });
@@ -952,22 +1383,33 @@ async function executeWatchWorkflowTestRun(
     return;
   }
 
-  const summary = parseStoredSummary(run.summary);
-  const results = parseStoredResults(run.results);
+  const summary = healed?.healed ? healed.summary : parseStoredSummary(run.summary);
+  const results = healed?.healed ? healed.results : parseStoredResults(run.results);
   const plannedItems = parsePlannedItems(run.summary);
-  const plannedTotal = summary.plannedQueries ?? plannedItems.length;
+  const plannedTotal = resolveWatchPlannedTotal({
+    plannedQueries: summary.plannedQueries,
+    plannedItemsLength: plannedItems.length,
+    resultsLength: results.length,
+    summaryTotal: summary.total,
+    runStatus: summary.runStatus,
+  });
+  const completedQueries =
+    plannedTotal > 0
+      ? Math.min(results.length, plannedTotal)
+      : results.length;
 
   await stream.writeSSE({
     event: "start",
     data: JSON.stringify({
       testName: run.testName,
       testId: run.workflowTestId,
-      totalQueries: Math.max(0, plannedTotal - results.length),
+      totalQueries:
+        plannedTotal > 0 ? Math.max(0, plannedTotal - results.length) : 0,
       overallTotalQueries: plannedTotal,
-      completedQueries: results.length,
+      completedQueries,
       dryRun: run.dryRun,
       runId: run.id,
-      resume: results.length > 0,
+      resume: true,
     }),
   });
 
@@ -1004,74 +1446,60 @@ async function executeWatchWorkflowTestRun(
     });
     stream.onAbort(() => unsubscribe());
     await waitForRunEnd(runId);
-    return;
-  }
 
-  let lastCount = results.length;
-  const poll = setInterval(async () => {
     const latest = await prisma.workflowTestRun.findFirst({
       where: { id: runId, userId },
     });
-    if (!latest) {
-      clearInterval(poll);
-      return;
+    if (latest) {
+      const latestSummary = parseStoredSummary(latest.summary);
+      const latestResults = parseStoredResults(latest.results);
+      if (latestSummary.runStatus !== "running") {
+        await stream.writeSSE({
+          event: "complete",
+          data: JSON.stringify(
+            normalizeRunReport({
+              testId: latest.workflowTestId,
+              runId: latest.id,
+              testName: latest.testName,
+              dryRun: latest.dryRun,
+              delayMs: latest.delayMs,
+              database: latest.database as {
+                dbType: string;
+                name: string;
+                host: string;
+              },
+              ranAt: latest.ranAt.toISOString(),
+              agent: latest.agent as WorkflowTestReportPayload["agent"],
+              summary: latestSummary,
+              results: latestResults,
+            }),
+          ),
+        });
+      }
     }
-    const latestResults = parseStoredResults(latest.results);
-    const latestSummary = parseStoredSummary(latest.summary);
-    for (let i = lastCount; i < latestResults.length; i += 1) {
-      await stream.writeSSE({
-        event: "result",
-        data: JSON.stringify(latestResults[i]),
-      }).catch(() => undefined);
-    }
-    lastCount = latestResults.length;
-    if (latestSummary.runStatus !== "running") {
-      clearInterval(poll);
-      const report = normalizeRunReport({
-        testId: latest.workflowTestId,
-        runId: latest.id,
-        testName: latest.testName,
-        dryRun: latest.dryRun,
-        delayMs: latest.delayMs,
-        database: latest.database as {
-          dbType: string;
-          name: string;
-          host: string;
-        },
-        ranAt: latest.ranAt.toISOString(),
-        agent: latest.agent as WorkflowTestReportPayload["agent"],
-        summary: latestSummary,
-        results: latestResults,
-      });
-      await stream.writeSSE({
-        event: "complete",
-        data: JSON.stringify(report),
-      }).catch(() => undefined);
-    }
-  }, 2000);
+    return;
+  }
 
-  stream.onAbort(() => clearInterval(poll));
-  await new Promise<void>((resolve) => {
-    const checkDone = setInterval(async () => {
-      const latest = await prisma.workflowTestRun.findFirst({
-        where: { id: runId, userId },
-      });
-      if (!latest) {
-        clearInterval(checkDone);
-        clearInterval(poll);
-        resolve();
-        return;
-      }
-      if (parseStoredSummary(latest.summary).runStatus !== "running") {
-        clearInterval(checkDone);
-        resolve();
-      }
-    }, 2000);
-    stream.onAbort(() => {
-      clearInterval(checkDone);
-      clearInterval(poll);
-      resolve();
-    });
+  // Status says running but no live executor — heal and complete (defensive).
+  const orphan = await finalizeOrphanedRunningRun(runId, userId);
+  const terminalSummary = orphan?.summary ?? summary;
+  const terminalResults = orphan?.results ?? results;
+  await stream.writeSSE({
+    event: "complete",
+    data: JSON.stringify(
+      normalizeRunReport({
+        testId: run.workflowTestId,
+        runId: run.id,
+        testName: run.testName,
+        dryRun: run.dryRun,
+        delayMs: run.delayMs,
+        database: run.database as { dbType: string; name: string; host: string },
+        ranAt: run.ranAt.toISOString(),
+        agent: run.agent as WorkflowTestReportPayload["agent"],
+        summary: terminalSummary,
+        results: terminalResults,
+      }),
+    ),
   });
 }
 
@@ -1083,6 +1511,9 @@ workflowTestRoutes.get("/", async (c) => {
     include: {
       agentProfile: {
         select: { id: true, name: true, llmProvider: true, modelName: true },
+      },
+      databaseConnection: {
+        select: { id: true, name: true, dbType: true },
       },
       runs: {
         orderBy: { ranAt: "desc" },
@@ -1155,10 +1586,17 @@ workflowTestRoutes.post("/runs/:runId/cancel", async (c) => {
   const user = c.get("user");
   const runId = c.req.param("runId");
   const cancelled = cancelActiveRun(runId, user.id);
-  if (!cancelled) {
-    return c.json({ error: "No active workflow test run found to cancel." }, 404);
+  if (cancelled) {
+    return c.json({ ok: true });
   }
-  return c.json({ ok: true });
+
+  // Run not in memory (refresh/server restart) — still mark DB so UI can stop.
+  const healed = await finalizeOrphanedRunningRun(runId, user.id);
+  if (healed?.healed || (healed && healed.summary.runStatus !== "running")) {
+    return c.json({ ok: true, orphaned: true });
+  }
+
+  return c.json({ error: "No active workflow test run found to cancel." }, 404);
 });
 
 workflowTestRoutes.get("/runs/:runId/watch", async (c) => {
@@ -1187,6 +1625,8 @@ workflowTestRoutes.get("/runs/:runId", async (c) => {
   const user = c.get("user");
   const runId = c.req.param("runId");
 
+  await finalizeOrphanedRunningRun(runId, user.id);
+
   const run = await prisma.workflowTestRun.findFirst({
     where: { id: runId, userId: user.id },
   });
@@ -1214,7 +1654,7 @@ workflowTestRoutes.post("/runs/:runId/resume", async (c) => {
   const runId = c.req.param("runId");
   const body = await c.req
     .json<{ dryRun?: boolean; delayMs?: number }>()
-    .catch(() => ({}));
+    .catch((): { dryRun?: boolean; delayMs?: number } => ({}));
 
   return streamSSE(c, async (stream) => {
     const keepAlive = setInterval(() => {
@@ -1238,7 +1678,14 @@ workflowTestRoutes.post("/runs/:runId/rerun-failures", async (c) => {
   const user = c.get("user");
   const runId = c.req.param("runId");
   const body = await c.req
-    .json<{ dryRun?: boolean; delayMs?: number }>()
+    .json<{
+      dryRun?: boolean;
+      delayMs?: number;
+      agentProfileId?: string | null;
+      categoryType?: string;
+      execution?: ExecutionPolicyOverrides | null;
+      groups?: RerunSetupGroup[];
+    }>()
     .catch(() => ({}));
 
   return streamSSE(c, async (stream) => {
@@ -1262,7 +1709,7 @@ workflowTestRoutes.post("/runs/:runId/rerun-failures", async (c) => {
 workflowTestRoutes.post("/:testId/groups/failures/import", async (c) => {
   const user = c.get("user");
   const testId = c.req.param("testId");
-  const body = await c.req.json<{ runId?: string }>();
+  const body = await c.req.json<{ runId?: string; groupName?: string }>();
 
   const runId = body.runId?.trim();
   if (!runId) {
@@ -1275,8 +1722,44 @@ workflowTestRoutes.post("/:testId/groups/failures/import", async (c) => {
   if (!test) return c.json({ error: "Workflow test not found." }, 404);
 
   try {
-    const result = await importFailuresFromRun(testId, runId, user.id);
+    const result = await importFailuresFromRun(
+      testId,
+      runId,
+      user.id,
+      body.groupName,
+    );
     return c.json(result);
+  } catch (err) {
+    return c.json({ error: errorMessage(err) }, 400);
+  }
+});
+
+workflowTestRoutes.patch("/:testId/groups/failures/policy", async (c) => {
+  const user = c.get("user");
+  const testId = c.req.param("testId");
+  const body = await c.req
+    .json<{
+      categoryType?: string;
+      executionOverrides?: unknown;
+    }>()
+    .catch(() => ({}));
+
+  const test = await prisma.workflowTest.findFirst({
+    where: { id: testId, userId: user.id },
+  });
+  if (!test) return c.json({ error: "Workflow test not found." }, 404);
+
+  try {
+    const groups = await updateFailuresGroupPolicy(testId, {
+      categoryType: body.categoryType,
+      executionOverrides:
+        body.executionOverrides === undefined
+          ? undefined
+          : (body.executionOverrides as
+              | import("../workflowTestCategory.js").ExecutionPolicyOverrides
+              | null),
+    });
+    return c.json({ groups });
   } catch (err) {
     return c.json({ error: errorMessage(err) }, 400);
   }
@@ -1288,7 +1771,7 @@ workflowTestRoutes.post("/:testId/groups/:groupId/run", async (c) => {
   const groupId = c.req.param("groupId");
   const body = await c.req
     .json<{ dryRun?: boolean; delayMs?: number }>()
-    .catch(() => ({}));
+    .catch((): { dryRun?: boolean; delayMs?: number } => ({}));
 
   const test = await prisma.workflowTest.findFirst({
     where: { id: testId, userId: user.id },
@@ -1327,6 +1810,7 @@ workflowTestRoutes.post("/:testId/groups/:groupId/run", async (c) => {
           dryRun,
           delayMs,
           agentProfileId: test.agentProfileId,
+          databaseConnectionId: test.databaseConnectionId,
         },
         stream,
       );
@@ -1350,6 +1834,9 @@ workflowTestRoutes.get("/:testId", async (c) => {
     include: {
       agentProfile: {
         select: { id: true, name: true, llmProvider: true, modelName: true },
+      },
+      databaseConnection: {
+        select: { id: true, name: true, dbType: true },
       },
       runs: {
         orderBy: { ranAt: "desc" },
@@ -1426,7 +1913,13 @@ workflowTestRoutes.post("/run", async (c) => {
     dryRun?: boolean;
     delayMs?: number;
     agentProfileId?: string | null;
-    groups?: Array<{ name?: string; queries?: string[] | string }>;
+    databaseConnectionId?: string | null;
+    groups?: Array<{
+      name?: string;
+      queries?: string[] | string;
+      categoryType?: string;
+      execution?: unknown;
+    }>;
     groupIds?: string[];
   }>();
 
@@ -1435,23 +1928,23 @@ workflowTestRoutes.post("/run", async (c) => {
     return c.json({ error: "A non-empty test name is required." }, 400);
   }
 
-  const manualGroups = normalizeGroups(body.groups ?? []);
+  const allManualGroups = normalizeGroups(body.groups ?? [], { keepEmpty: true });
+  const runnableManualGroups = normalizeGroups(body.groups ?? []);
   const groupIds = body.groupIds?.filter(Boolean);
 
-  if (!groupIds?.length && manualGroups.length === 0) {
-    return c.json(
-      { error: "At least one group with a name and queries is required." },
-      400,
-    );
+  if (!groupIds?.length && runnableManualGroups.length === 0) {
+    return c.json({ error: "At least one query is required to run." }, 400);
   }
 
   const dryRun = body.dryRun ?? false;
   const delayMs = Math.max(0, body.delayMs ?? 0);
   const agentProfileId = body.agentProfileId?.trim() || null;
+  const databaseConnectionId = body.databaseConnectionId?.trim() || null;
 
   const savedTest = await upsertWorkflowTest(user.id, {
     testName,
     agentProfileId,
+    databaseConnectionId,
     dryRun,
     delayMs,
   });
@@ -1467,8 +1960,8 @@ workflowTestRoutes.post("/run", async (c) => {
     );
   }
 
-  if (manualGroups.length > 0) {
-    await saveManualGroups(savedTest.id, manualGroups);
+  if (allManualGroups.length > 0) {
+    await saveManualGroups(savedTest.id, allManualGroups);
   } else {
     await ensureFailuresGroup(savedTest.id);
   }
@@ -1491,6 +1984,7 @@ workflowTestRoutes.post("/run", async (c) => {
           dryRun,
           delayMs,
           agentProfileId: agentProfileId ?? savedTest.agentProfileId,
+          databaseConnectionId,
         },
         stream,
       );
@@ -1504,3 +1998,22 @@ workflowTestRoutes.post("/run", async (c) => {
     }
   });
 });
+
+function combineAbortSignals(
+  primary: AbortSignal,
+  secondary?: AbortSignal,
+): AbortSignal {
+  if (!secondary) return primary;
+  if (typeof AbortSignal.any === "function") {
+    return AbortSignal.any([primary, secondary]);
+  }
+  const controller = new AbortController();
+  const onAbort = () => controller.abort();
+  if (primary.aborted || secondary.aborted) {
+    controller.abort();
+    return controller.signal;
+  }
+  primary.addEventListener("abort", onAbort, { once: true });
+  secondary.addEventListener("abort", onAbort, { once: true });
+  return controller.signal;
+}
