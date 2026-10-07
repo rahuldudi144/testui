@@ -11,7 +11,8 @@ export type LlmProvider =
   | "openrouter"
   | "kilo"
   | "vllm"
-  | "litellm";
+  | "litellm"
+  | "openai_compatible";
 
 export interface ProviderOption {
   value: LlmProvider;
@@ -37,6 +38,7 @@ const PROVIDER_LABELS: Record<LlmProvider, string> = {
   nvidia_nim: "NVIDIA NIM",
   vllm: "vLLM",
   litellm: "LiteLLM",
+  openai_compatible: "OpenAI-compatible server",
   ollama: "Ollama",
   anthropic: "Anthropic",
   gemini: "Google Gemini",
@@ -53,6 +55,7 @@ const MODEL_PLACEHOLDERS: Partial<Record<LlmProvider, string>> = {
   nvidia_nim: "meta/llama-3.1-8b-instruct",
   vllm: "meta-llama/Llama-3.1-8B-Instruct",
   litellm: "gpt-4o-mini",
+  openai_compatible: "qwen3.6-35b-a3b",
   ollama: "llama3.1",
   anthropic: "claude-sonnet-4-20250514",
   gemini: "gemini-2.0-flash",
@@ -93,10 +96,13 @@ const REQUIRES_BASE_URL = new Set<LlmProvider>([
   "nvidia_nim",
   "vllm",
   "litellm",
+  "openai_compatible",
 ]);
 
 const REQUIRES_API_KEY = new Set<LlmProvider>(
-  (Object.keys(PROVIDER_LABELS) as LlmProvider[]).filter((p) => p !== "ollama"),
+  (Object.keys(PROVIDER_LABELS) as LlmProvider[]).filter(
+    (p) => p !== "ollama" && p !== "openai_compatible",
+  ),
 );
 
 const PROVIDER_GROUPS: Array<{ group: string; providers: LlmProvider[] }> = [
@@ -113,6 +119,7 @@ const PROVIDER_GROUPS: Array<{ group: string; providers: LlmProvider[] }> = [
       "nvidia_nim",
       "vllm",
       "litellm",
+      "openai_compatible",
     ],
   },
   { group: "Ollama", providers: ["ollama"] },

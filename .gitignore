@@ -36,6 +36,9 @@ yarn-error.log*
 # vercel
 .vercel
 
+# dev server writes the API port it actually bound
+.dev-api-port
+
 # typescript
 *.tsbuildinfo
 next-env.d.ts

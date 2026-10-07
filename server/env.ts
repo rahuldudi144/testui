@@ -17,6 +17,7 @@ const LLM_PROVIDERS = [
   "nvidia_nim",
   "vllm",
   "litellm",
+  "openai_compatible",
   "ollama",
   "anthropic",
   "gemini",
@@ -34,7 +35,7 @@ const envSchema = z
       .default("openai")
       .refine((value) => isKnownProvider(value), {
         message:
-          "DB_AGENT_LLM_PROVIDER must be one of: openai, groq, together, fireworks, deepinfra, openrouter, kilo, nvidia_nim, vllm, litellm, ollama, anthropic, gemini",
+          "DB_AGENT_LLM_PROVIDER must be one of: openai, groq, together, fireworks, deepinfra, openrouter, kilo, nvidia_nim, vllm, litellm, openai_compatible, ollama, anthropic, gemini",
       })
       .transform((value) => value as LlmProvider),
     /** Preferred API key for any provider that requires one. */

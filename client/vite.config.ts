@@ -1,8 +1,33 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
+import dotenv from "dotenv";
+import fs from "fs";
 import path from "path";
+import { fileURLToPath } from "url";
 import type { IncomingMessage, ServerResponse } from "node:http";
+
+const clientDir = path.dirname(fileURLToPath(import.meta.url));
+dotenv.config({ path: path.resolve(clientDir, "../.env") });
+
+function devApiTarget(): string {
+  const portFile = path.resolve(clientDir, "../.dev-api-port");
+  try {
+    const fromFile = Number(fs.readFileSync(portFile, "utf8").split("\n")[0]?.trim());
+    if (Number.isInteger(fromFile) && fromFile > 0 && fromFile <= 65535) {
+      return `http://127.0.0.1:${fromFile}`;
+    }
+  } catch {
+    // Server has not published a port yet.
+  }
+
+  const fromEnv = Number(process.env.TESTUI_PORT ?? 4000);
+  const port =
+    Number.isInteger(fromEnv) && fromEnv > 0 && fromEnv <= 65535
+      ? fromEnv
+      : 4000;
+  return `http://127.0.0.1:${port}`;
+}
 
 function isEventStreamResponse(proxyRes: IncomingMessage): boolean {
   const contentType = proxyRes.headers["content-type"];
@@ -11,17 +36,17 @@ function isEventStreamResponse(proxyRes: IncomingMessage): boolean {
 
 export default defineConfig({
   plugins: [react(), tailwindcss()],
-  root: path.resolve(__dirname),
+  root: clientDir,
   build: {
-    outDir: path.resolve(__dirname, "../dist"),
+    outDir: path.resolve(clientDir, "../dist"),
     emptyOutDir: true,
   },
   server: {
     port: 5173,
-    strictPort: true,
     proxy: {
       "/api": {
-        target: "http://localhost:4000",
+        target: devApiTarget(),
+        router: () => devApiTarget(),
         changeOrigin: true,
         secure: false,
         timeout: 300_000,

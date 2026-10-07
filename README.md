@@ -2,25 +2,41 @@
 
 A self-contained chat UI for manually testing the DB-Agent module. It handles user authentication, chat session persistence (via Prisma + Postgres), and streams answers from `DatabaseAgent`.
 
-The agent's **target database** is configured separately via `DB_AGENT_DB_URI` (external to this Docker stack).
+The agent's **target database** is chosen in the UI (saved connections per user), not via QueryFabric `backend/.env`.
+
+## Quick start (QueryFabric repo root)
+
+Run testui in a **second terminal** while the main app uses its own stack:
+
+```bash
+./scripts/start-testui.sh
+```
+
+This script only starts **testui's Docker Postgres** (port **5555**), applies Prisma migrations, then runs dev (**5173** + **4000**). Agents, LLM keys, and databases you query are configured in **Settings** inside testui and stored in testui's database.
+
+Optional flags: `--docker-only` (Postgres + migrate, no Vite), `--seed` (demo user from `prisma/seed`).
+
+If `testui/.env` is missing, the script creates a **minimal** boot `.env` (app DB URL + session secret + `ollama` default). It does **not** copy `.env.example` or sync main-app secrets.
 
 ## Prerequisites
 
 - [Bun](https://bun.sh)
 - [Docker](https://www.docker.com) (for the app Postgres)
 
-## Setup
+## Setup (manual)
 
 ```bash
 cd backend/src/features/DB-Agent/testui
 cp .env.example .env
 ```
 
-Edit `.env`:
+Edit `.env` if you need server-wide LLM defaults (optional). **Per-user agents and database connections are configured in the UI** and saved in testui Postgres.
+
+Minimum for manual setup:
 
 1. Set `TESTUI_SESSION_SECRET` to a long random string (16+ characters).
-2. Set `DB_AGENT_OPENAI_API_KEY` to your OpenAI API key.
-3. Set `DB_AGENT_DB_URI` to your external database (the one the agent queries).
+2. Set `TESTUI_DATABASE_URL` to match Docker (see `.env.example`).
+3. Set provider/API key vars only if you rely on env defaults instead of Settings → Agents.
 
 Start the app database:
 
@@ -85,7 +101,7 @@ Serves the built client and API from port `4000` (or `TESTUI_PORT`).
 
 - **App DB** (Docker Postgres on port 5555): users, conversations, message history, and **per-user database connections** via Prisma.
 - **Agent target DB** (configured in UI): each user saves PostgreSQL/MySQL connection URIs; the active connection is used when chatting.
-- **Agent LLM**: configured via `DB_AGENT_OPENAI_API_KEY` in `.env`.
+- **Agent LLM**: per-user agent profiles in Settings (env vars are optional fallbacks).
 - **Agent**: imported from `../../index.js` — stateless; the test UI owns session, history, and DB config persistence.
 
 ## Database connections (UI)
@@ -116,4 +132,4 @@ Open **Settings** from the sidebar or chat toolbar:
 
 - **Invalid environment**: ensure all required vars in `.env.example` are set.
 - **Database connection errors**: run `docker compose ps` and confirm Postgres is healthy on port 5555.
-- **Agent DB errors**: verify `DB_AGENT_DB_URI` points to a reachable database with readable schema.
+- **Agent DB errors**: in Settings, test and activate a saved connection; ensure the URI is reachable from the server.

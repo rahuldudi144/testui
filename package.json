@@ -4,7 +4,6 @@
   "type": "module",
   "scripts": {
     "dev": "bun run dev:server & bun run dev:client",
-    "predev": "bun scripts/free-dev-port.ts 4000",
     "dev:server": "bun --watch --env-file=.env server/index.ts",
     "dev:client": "vite --config client/vite.config.ts",
     "build": "vite build --config client/vite.config.ts",
@@ -13,6 +12,7 @@
     "docker:down": "docker compose down",
     "prisma:generate": "bun --env-file=.env prisma generate",
     "prisma:migrate": "bun --env-file=.env prisma migrate dev",
+    "prisma:migrate:deploy": "bun --env-file=.env prisma migrate deploy",
     "prisma:seed": "bun --env-file=.env prisma/seed.ts",
     "db:seed": "bun run prisma:seed",
     "db:setup": "bun run docker:up && bun run prisma:migrate && bun run db:seed",

@@ -62,7 +62,8 @@ export type LlmProvider =
   | "openrouter"
   | "kilo"
   | "vllm"
-  | "litellm";
+  | "litellm"
+  | "openai_compatible";
 
 export type EmbeddingProvider = "openai" | "local" | "ollama" | "gemini";
 

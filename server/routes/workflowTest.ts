@@ -48,11 +48,11 @@ import {
   updateFailuresGroupPolicy,
 } from "../workflowTestGroups.js";
 import { authMiddleware } from "./auth.js";
+import { errorMessage } from "../../../utils/errors.js";
 import {
-  errorMessage,
   formatFatalProviderStopMessage,
   isFatalProviderError,
-} from "../../../utils/errors.js";
+} from "../fatalProviderError.js";
 import { isAbortError } from "../../../utils/abort.js";
 import { extractMetricsFromDebug } from "../extractRunMetrics.js";
 import {

@@ -33,10 +33,11 @@ describe("providerLabel", () => {
 });
 
 describe("listProviderOptions", () => {
-  test("includes all 13 DB-Agent providers", () => {
+  test("includes every DB-Agent provider", () => {
     const options = listProviderOptions();
-    expect(options.length).toBe(13);
+    expect(options.length).toBe(14);
     expect(options.map((option) => option.value)).toContain("openrouter");
+    expect(options.map((option) => option.value)).toContain("openai_compatible");
     expect(options.map((option) => option.value)).toContain("ollama");
   });
 });
@@ -55,8 +56,9 @@ describe("baseUrlFieldMeta", () => {
 });
 
 describe("providerShowsApiKey", () => {
-  test("ollama does not require API key field", () => {
+  test("ollama and openai_compatible do not require an API key field", () => {
     expect(providerShowsApiKey("ollama")).toBe(false);
+    expect(providerShowsApiKey("openai_compatible")).toBe(false);
   });
 
   test("groq requires API key field", () => {
