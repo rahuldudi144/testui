@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "bun run dev:server & bun run dev:client",
+    "dev": "bun run dev:server & vite --config client/vite.config.ts",
     "dev:server": "bun --watch --env-file=.env server/index.ts",
     "dev:client": "vite --config client/vite.config.ts --host",
     "build": "vite build --config client/vite.config.ts",
