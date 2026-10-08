@@ -42,7 +42,10 @@ export default defineConfig({
     emptyOutDir: true,
   },
   server: {
+    host: true,
     port: 5173,
+    // Allow reverse-proxied hostnames (e.g. test-clinora.dev4fun.science).
+    allowedHosts: true,
     proxy: {
       "/api": {
         target: devApiTarget(),
