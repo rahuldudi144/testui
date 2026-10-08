@@ -44,12 +44,14 @@ export default defineConfig({
   server: {
     host: true,
     port: 5173,
-    // Allow reverse-proxied hostnames (e.g. test-clinora.dev4fun.science).
-    allowedHosts: true,
+    // Reverse-proxied prod host + any *.dev4fun.science subdomain.
+    allowedHosts: [
+      "test-clinora.dev4fun.science",
+      ".dev4fun.science",
+    ],
     proxy: {
       "/api": {
         target: devApiTarget(),
-        router: () => devApiTarget(),
         changeOrigin: true,
         secure: false,
         timeout: 300_000,
@@ -62,7 +64,7 @@ export default defineConfig({
               proxyReq.setHeader("accept-encoding", "identity");
             }
           });
-          proxy.on("proxyRes", (proxyRes, req, res) => {
+          proxy.on("proxyRes", (proxyRes, _req, res) => {
             const response = res as ServerResponse;
             const isSse = isEventStreamResponse(proxyRes);
             const headers = { ...proxyRes.headers };
