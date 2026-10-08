@@ -14,7 +14,7 @@ Run testui in a **second terminal** while the main app uses its own stack:
 
 This script only starts **testui's Docker Postgres** (port **5555**), applies Prisma migrations, then runs dev (**5173** + **4000**). Agents, LLM keys, and databases you query are configured in **Settings** inside testui and stored in testui's database.
 
-Optional flags: `--docker-only` (Postgres + migrate, no Vite), `--seed` (demo user from `prisma/seed`).
+Optional flag: `--docker-only` (Postgres + migrate + seed, no Vite). The start script always seeds the login user.
 
 If `testui/.env` is missing, the script creates a **minimal** boot `.env` (app DB URL + session secret + `ollama` default). It does **not** copy `.env.example` or sync main-app secrets.
 

@@ -58,9 +58,7 @@ export function LoginForm({ onLogin }: Props) {
       <Card className="w-full max-w-[420px]">
         <CardHeader>
           <CardTitle>Welcome back</CardTitle>
-          <CardDescription>
-            Seeded account: rahul@test.com / 1234
-          </CardDescription>
+          <CardDescription>Sign in with your test UI account.</CardDescription>
         </CardHeader>
         <CardContent>
           <form onSubmit={handleSubmit} className="grid gap-4">
@@ -72,7 +70,7 @@ export function LoginForm({ onLogin }: Props) {
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
                 autoComplete="email"
-                placeholder="rahul@test.com"
+                placeholder="you@example.com"
                 required
               />
             </FormField>
