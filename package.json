@@ -10,13 +10,12 @@
     "start": "bun --env-file=.env server/index.ts",
     "docker:up": "docker compose up -d",
     "docker:down": "docker compose down",
-    "prisma:generate": "bun --env-file=.env prisma generate",
-    "prisma:migrate": "bun --env-file=.env prisma migrate dev",
-    "prisma:migrate:deploy": "bun --env-file=.env prisma migrate deploy",
+    "prisma:generate": "npx --yes prisma generate",
+    "prisma:migrate": "npx --yes prisma migrate dev",
+    "prisma:migrate:deploy": "npx --yes prisma migrate deploy",
     "prisma:seed": "bun --env-file=.env prisma/seed.ts",
     "db:seed": "bun run prisma:seed",
-    "db:setup": "bun run docker:up && bun run prisma:migrate && bun run db:seed",
-    "postinstall": "bun --env-file=.env prisma generate"
+    "db:setup": "bun run docker:up && bun run prisma:migrate && bun run db:seed"
   },
   "dependencies": {
     "@hono/node-server": "^1.14.3",

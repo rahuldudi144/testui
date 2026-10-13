@@ -17,6 +17,11 @@ import {
 } from "../knowledgeIndexStream.js";
 import { testDatabaseConnection } from "../agent.js";
 import { errorMessage } from "../../../utils/errors.js";
+import {
+  clearCachedSchema,
+  setCachedSchema,
+} from "../schemaCache.js";
+import type { DatabaseMetadata } from "../../../types/index.js";
 
 type AuthUser = { id: string; username: string; createdAt: Date };
 
@@ -240,6 +245,21 @@ databaseRoutes.patch("/:id", async (c) => {
           : {}),
     },
   });
+
+  if (uriChanged) {
+    clearCachedSchema(id);
+  } else if (body.dbMetadata !== undefined) {
+    if (
+      body.dbMetadata &&
+      typeof body.dbMetadata === "object" &&
+      !Array.isArray(body.dbMetadata) &&
+      "tables" in body.dbMetadata
+    ) {
+      setCachedSchema(id, body.dbMetadata as DatabaseMetadata);
+    } else {
+      clearCachedSchema(id);
+    }
+  }
 
   return c.json({ database: toPublicDatabase(connection) });
 });

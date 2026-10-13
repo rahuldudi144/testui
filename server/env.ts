@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { canonicalizeLlmProvider } from "../../llm/providerRegistry.js";
 import {
   isKnownProvider,
   requiresApiKey,
@@ -37,7 +38,7 @@ const envSchema = z
         message:
           "DB_AGENT_LLM_PROVIDER must be one of: openai, groq, together, fireworks, deepinfra, openrouter, kilo, nvidia_nim, vllm, litellm, openai_compatible, ollama, anthropic, gemini",
       })
-      .transform((value) => value as LlmProvider),
+      .transform((value) => canonicalizeLlmProvider(value) as LlmProvider),
     /** Preferred API key for any provider that requires one. */
     DB_AGENT_API_KEY: z.string().optional(),
     /** Backward-compatible alias for DB_AGENT_API_KEY (OpenAI-era name). */

@@ -233,9 +233,9 @@ conversationRoutes.post("/:id/messages", async (c) => {
     maxValidationRetries: env.DB_AGENT_MAX_VALIDATION_RETRIES,
   };
 
-  let agentInputBase: ReturnType<typeof connectionAgentInvokeInput>;
+  let agentInputBase: Awaited<ReturnType<typeof connectionAgentInvokeInput>>;
   try {
-    agentInputBase = connectionAgentInvokeInput(activeDb, user.id);
+    agentInputBase = await connectionAgentInvokeInput(activeDb, user.id);
   } catch (error) {
     return c.json({ error: errorMessage(error) }, 400);
   }

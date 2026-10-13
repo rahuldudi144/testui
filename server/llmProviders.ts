@@ -1,5 +1,6 @@
 import type { LlmProvider } from "../../types/index.js";
 import {
+  canonicalizeLlmProvider,
   isKnownProvider,
   requiresApiKey,
   requiresBaseUrl,
@@ -101,9 +102,8 @@ export function listProviderOptions(): ProviderOption[] {
 export function normalizeProviderInput(
   value?: string | null,
 ): LlmProvider | null {
-  const provider = value?.trim().toLowerCase();
-  if (!provider) return null;
-  return isKnownProvider(provider) ? provider : null;
+  if (!value?.trim()) return null;
+  return canonicalizeLlmProvider(value);
 }
 
 export function baseUrlFieldMeta(provider: LlmProvider): BaseUrlFieldMeta {

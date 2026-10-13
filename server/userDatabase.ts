@@ -1,6 +1,11 @@
-import type { DatabaseType } from "../../types/index.js";
+import type {
+  DatabaseMetadata,
+  DatabaseType,
+  RetrievalMode,
+} from "../../types/index.js";
 import { prisma } from "./db.js";
 import { loadEnv } from "./env.js";
+import { ensureConnectionSchema } from "./schemaCache.js";
 
 export type SchemaSyncStatus = "idle" | "syncing" | "ready" | "failed";
 
@@ -59,20 +64,41 @@ export function resolveKnowledgeDbUri(connection: {
   );
 }
 
-/** InvokeInput knowledge fields derived from a stored connection + user. */
-export function connectionAgentInvokeInput(connection: {
-  id: string;
+/** Knowledge URI for indexing only (Build knowledge). Chat does not use this. */
+export function resolveKnowledgeDbUriForIndexing(connection: {
   knowledgeDbUri?: string | null;
-  businessContext?: string | null;
-}, userId: string): {
-  knowledgeDbUri: string;
+}): string {
+  return resolveKnowledgeDbUri(connection);
+}
+
+export type ConnectionAgentInvokeFields = {
+  retrievalMode: RetrievalMode;
+  dbSchema: DatabaseMetadata;
   userId: string;
   databaseId: string;
   businessSummary?: string;
-} {
+};
+
+/**
+ * Schema-mode InvokeInput fields for testui chat / workflow (no vector DB).
+ * Ensures schema is cached (memory → Prisma → live fetch once).
+ */
+export async function connectionAgentInvokeInput(
+  connection: {
+    id: string;
+    dbType: string;
+    dbUri: string;
+    dbMetadata?: unknown;
+    knowledgeDbUri?: string | null;
+    businessContext?: string | null;
+  },
+  userId: string,
+): Promise<ConnectionAgentInvokeFields> {
+  const dbSchema = await ensureConnectionSchema(connection);
   const businessSummary = connection.businessContext?.trim();
   return {
-    knowledgeDbUri: resolveKnowledgeDbUri(connection),
+    retrievalMode: "schema",
+    dbSchema,
     userId,
     databaseId: connection.id,
     businessSummary: businessSummary || undefined,

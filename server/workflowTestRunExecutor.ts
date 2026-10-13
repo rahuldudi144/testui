@@ -201,7 +201,7 @@ async function runQueryItem(
         requestId,
         correlationId,
         abortSignal,
-        ...connectionAgentInvokeInput(activeDb, userId),
+        ...(await connectionAgentInvokeInput(activeDb, userId)),
       },
       runnerOptions,
     );

@@ -57,6 +57,24 @@ if (isProduction()) {
 }
 
 const env = loadEnv();
+
+async function warmSchemaCache(): Promise<void> {
+  try {
+    const { warmSchemaCacheFromDb } = await import("./schemaCache.js");
+    const loaded = await warmSchemaCacheFromDb();
+    if (loaded > 0) {
+      console.log(`Schema cache: warmed ${loaded} connection(s) from dbMetadata`);
+    }
+  } catch (error) {
+    console.warn(
+      "Schema cache warm skipped:",
+      error instanceof Error ? error.message : error,
+    );
+  }
+}
+
+void warmSchemaCache();
+
 const preferredPort = env.TESTUI_PORT;
 const portFile = path.resolve(__dirname, "../.dev-api-port");
 

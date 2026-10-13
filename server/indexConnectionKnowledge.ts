@@ -13,6 +13,8 @@ import { createAgent } from "./agent.js";
 import type { AgentConfigOverrides } from "./agent.js";
 import { getActiveAgentForUser, profileAgentConfig } from "./userAgent.js";
 import { countTables, resolveKnowledgeDbUri } from "./userDatabase.js";
+import { setCachedSchema } from "./schemaCache.js";
+import type { DatabaseMetadata } from "../../types/index.js";
 
 export type KnowledgeIndexStatus = "idle" | "syncing" | "ready" | "failed";
 
@@ -95,6 +97,8 @@ export async function indexConnectionKnowledge(
         dbMetadata: dbMetadata as unknown as Prisma.InputJsonValue,
       },
     });
+
+    setCachedSchema(connectionId, dbMetadata as DatabaseMetadata);
 
     const agent = createAgent(dbType, connection.dbUri, agentOptions);
     const businessSummary = connection.businessContext?.trim() || undefined;

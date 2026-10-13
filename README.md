@@ -101,8 +101,10 @@ Serves the built client and API from port `4000` (or `TESTUI_PORT`).
 
 - **App DB** (Docker Postgres on port 5555): users, conversations, message history, and **per-user database connections** via Prisma.
 - **Agent target DB** (configured in UI): each user saves PostgreSQL/MySQL connection URIs; the active connection is used when chatting.
+- **Schema-in-prompt (chat / workflow):** testui injects the full structural schema into agent system prompts (`retrievalMode: "schema"`). It skips the vector retrieval chain (`entityExtractor` → `semanticSearch` → …). Schema is cached in memory per connection (warmed from Prisma `dbMetadata` at boot; live-fetched once on miss). **No meaning generation** is required for chat.
+- **Build knowledge (optional):** Settings can still index into pgvector (`KNOWLEDGE_DB_URI` or per-connection knowledge URI). That path is **not** required for chat or workflow tests.
 - **Agent LLM**: per-user agent profiles in Settings (env vars are optional fallbacks).
-- **Agent**: imported from `../../index.js` — stateless; the test UI owns session, history, and DB config persistence.
+- **Agent**: imported from `../../index.js` — the test UI owns session, history, DB config, and schema cache.
 
 ## Database connections (UI)
 
