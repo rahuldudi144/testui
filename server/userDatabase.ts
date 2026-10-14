@@ -1,8 +1,4 @@
-import type {
-  DatabaseMetadata,
-  DatabaseType,
-  RetrievalMode,
-} from "../../types/index.js";
+import type { DatabaseMetadata, DatabaseType } from "../../types/index.js";
 import { prisma } from "./db.js";
 import { loadEnv } from "./env.js";
 import { ensureConnectionSchema } from "./schemaCache.js";
@@ -72,16 +68,15 @@ export function resolveKnowledgeDbUriForIndexing(connection: {
 }
 
 export type ConnectionAgentInvokeFields = {
-  retrievalMode: RetrievalMode;
-  dbSchema: DatabaseMetadata;
+  liveSchema: DatabaseMetadata;
   userId: string;
   databaseId: string;
   businessSummary?: string;
 };
 
 /**
- * Schema-mode InvokeInput fields for testui chat / workflow (no vector DB).
- * Ensures schema is cached (memory → Prisma → live fetch once).
+ * InvokeInput fields for testui chat / workflow.
+ * Uses the startup schema cache, then Prisma, then one live fetch.
  */
 export async function connectionAgentInvokeInput(
   connection: {
@@ -94,11 +89,10 @@ export async function connectionAgentInvokeInput(
   },
   userId: string,
 ): Promise<ConnectionAgentInvokeFields> {
-  const dbSchema = await ensureConnectionSchema(connection);
+  const liveSchema = await ensureConnectionSchema(connection);
   const businessSummary = connection.businessContext?.trim();
   return {
-    retrievalMode: "schema",
-    dbSchema,
+    liveSchema,
     userId,
     databaseId: connection.id,
     businessSummary: businessSummary || undefined,

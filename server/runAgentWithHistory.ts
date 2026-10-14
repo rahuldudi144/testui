@@ -280,14 +280,14 @@ class AgentRunner {
       debug: input.debug ?? false,
       observability,
       knowledgeDbUri: input.knowledgeDbUri ?? "",
-      userId: input.userId,
-      databaseId: input.databaseId,
+      userId: input.userId ?? "",
+      databaseId: input.databaseId ?? "",
       embeddings: this.embeddings,
+      liveSchema: input.liveSchema,
     };
   }
 
   private toInputState(input: InvokeInput): AgentInput {
-    const retrievalMode = input.retrievalMode ?? "knowledge";
     return {
       query: input.query,
       messages: input.messages ?? [],
@@ -298,11 +298,9 @@ class AgentRunner {
       businessSummary: input.businessSummary,
       systemPromptMode: input.systemPromptMode ?? "append",
       knowledgeDbUri: input.knowledgeDbUri ?? "",
-      userId: input.userId,
-      databaseId: input.databaseId,
+      userId: input.userId ?? "",
+      databaseId: input.databaseId ?? "",
       dryRun: input.dryRun ?? false,
-      retrievalMode,
-      dbSchema: retrievalMode === "schema" ? input.dbSchema : undefined,
     };
   }
 }
@@ -472,16 +470,8 @@ function validateInput(input: InvokeInput): void {
   if (!input || typeof input.query !== "string" || input.query.trim() === "") {
     throw new AgentError("INVALID_INPUT", "A non-empty query is required.");
   }
-  const retrievalMode = input.retrievalMode ?? "knowledge";
-  if (retrievalMode === "schema") {
-    if (!input.dbSchema || typeof input.dbSchema.tables !== "object") {
-      throw new AgentError(
-        "INVALID_INPUT",
-        "dbSchema is required when retrievalMode is schema.",
-      );
-    }
-  } else if (!input.knowledgeDbUri?.trim()) {
-    throw new AgentError("INVALID_INPUT", "knowledgeDbUri is required.");
+  if (!input.liveSchema || typeof input.liveSchema.tables !== "object") {
+    throw new AgentError("INVALID_INPUT", "liveSchema is required.");
   }
   if (!input.userId?.trim()) {
     throw new AgentError("INVALID_INPUT", "userId is required.");

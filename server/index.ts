@@ -58,23 +58,6 @@ if (isProduction()) {
 
 const env = loadEnv();
 
-async function warmSchemaCache(): Promise<void> {
-  try {
-    const { warmSchemaCacheFromDb } = await import("./schemaCache.js");
-    const loaded = await warmSchemaCacheFromDb();
-    if (loaded > 0) {
-      console.log(`Schema cache: warmed ${loaded} connection(s) from dbMetadata`);
-    }
-  } catch (error) {
-    console.warn(
-      "Schema cache warm skipped:",
-      error instanceof Error ? error.message : error,
-    );
-  }
-}
-
-void warmSchemaCache();
-
 const preferredPort = env.TESTUI_PORT;
 const portFile = path.resolve(__dirname, "../.dev-api-port");
 
@@ -85,7 +68,12 @@ const serverHolder: ServerHolder =
     serverHolderKey
   ] ??= {};
 
-serverHolder.server?.stop(true);
+const bootKey = Symbol.for("db-agent-testui.boot");
+type BootState = { generation: number };
+const bootState: BootState =
+  (globalThis as typeof globalThis & Record<symbol, BootState>)[bootKey] ??= {
+    generation: 0,
+  };
 
 function isAddrInUse(error: unknown): boolean {
   if (!error || typeof error !== "object") return false;
@@ -102,41 +90,75 @@ const serveOptions = {
   development: { hmr: false },
 } as const;
 
-let server: ReturnType<typeof Bun.serve>;
-try {
-  server = Bun.serve({ ...serveOptions, port: preferredPort });
-} catch (error) {
-  if (!isAddrInUse(error)) throw error;
-  server = Bun.serve({ ...serveOptions, port: 0 });
-  console.log(
-    `Port ${preferredPort} is in use; DB-Agent test UI API using ${server.port} instead`,
-  );
-}
+async function boot(): Promise<void> {
+  const generation = ++bootState.generation;
 
-serverHolder.server = server;
-fs.writeFileSync(portFile, `${server.port}\n${process.pid}\n`);
-
-function clearPortFile(): void {
   try {
-    const [portLine, pidLine] = fs.readFileSync(portFile, "utf8").split("\n");
-    if (portLine?.trim() === String(server.port) && pidLine?.trim() === String(process.pid)) {
-      fs.unlinkSync(portFile);
+    const { loadConnectionSchemas } = await import("./schemaCache.js");
+    const { loaded, failed } = await loadConnectionSchemas();
+    if (generation !== bootState.generation) return;
+    if (loaded === 0 && failed === 0) {
+      console.log("Schema cache: no saved connections");
+    } else {
+      console.log(
+        `Schema cache: loaded ${loaded} connection(s)${failed > 0 ? `, ${failed} failed` : ""}`,
+      );
     }
-  } catch {
-    // Another process already removed or replaced the file.
+  } catch (error) {
+    if (generation !== bootState.generation) return;
+    console.warn(
+      "Schema load skipped:",
+      error instanceof Error ? error.message : error,
+    );
+  }
+
+  if (generation !== bootState.generation) return;
+
+  serverHolder.server?.stop(true);
+
+  let server: ReturnType<typeof Bun.serve>;
+  try {
+    server = Bun.serve({ ...serveOptions, port: preferredPort });
+  } catch (error) {
+    if (!isAddrInUse(error)) throw error;
+    server = Bun.serve({ ...serveOptions, port: 0 });
+    console.log(
+      `Port ${preferredPort} is in use; DB-Agent test UI API using ${server.port} instead`,
+    );
+  }
+
+  if (generation !== bootState.generation) {
+    server.stop(true);
+    return;
+  }
+
+  serverHolder.server = server;
+  fs.writeFileSync(portFile, `${server.port}\n${process.pid}\n`);
+
+  function clearPortFile(): void {
+    try {
+      const [portLine, pidLine] = fs.readFileSync(portFile, "utf8").split("\n");
+      if (portLine?.trim() === String(server.port) && pidLine?.trim() === String(process.pid)) {
+        fs.unlinkSync(portFile);
+      }
+    } catch {
+      // Another process already removed or replaced the file.
+    }
+  }
+
+  process.on("exit", clearPortFile);
+
+  console.log(`DB-Agent test UI API listening on http://localhost:${server.port}`);
+
+  if (import.meta.hot) {
+    import.meta.hot.dispose(() => {
+      server.stop(true);
+      clearPortFile();
+      if (serverHolder.server === server) {
+        serverHolder.server = undefined;
+      }
+    });
   }
 }
 
-process.on("exit", clearPortFile);
-
-console.log(`DB-Agent test UI API listening on http://localhost:${server.port}`);
-
-if (import.meta.hot) {
-  import.meta.hot.dispose(() => {
-    server.stop(true);
-    clearPortFile();
-    if (serverHolder.server === server) {
-      serverHolder.server = undefined;
-    }
-  });
-}
+void boot();

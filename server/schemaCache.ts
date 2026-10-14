@@ -1,6 +1,7 @@
 /**
- * In-memory schema cache keyed by connectionId for testui schema-mode chat.
- * Live fetch only on miss (or force refresh); not on every message.
+ * In-memory schema cache keyed by connectionId.
+ * Startup live-fetches every saved connection. Later requests reuse memory,
+ * then Prisma dbMetadata, then one live fetch.
  */
 
 import type { Prisma } from "@prisma/client";
@@ -39,21 +40,71 @@ export function clearCachedSchema(connectionId: string): void {
   cache.delete(connectionId);
 }
 
-/** Load Prisma dbMetadata into memory for all connections that already have it. */
-export async function warmSchemaCacheFromDb(): Promise<number> {
+function errorText(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  return message.slice(0, 2000);
+}
+
+/**
+ * Live-fetch every saved connection before the API accepts traffic.
+ * Persists dbMetadata and fills the memory cache. One unreachable database
+ * is recorded as failed and does not stop the rest.
+ */
+export async function loadConnectionSchemas(): Promise<{
+  loaded: number;
+  failed: number;
+}> {
   const rows = await prisma.databaseConnection.findMany({
-    where: { dbMetadata: { not: null } },
-    select: { id: true, dbMetadata: true },
+    select: { id: true, name: true, dbType: true, dbUri: true },
   });
 
   let loaded = 0;
+  let failed = 0;
+
   for (const row of rows) {
-    if (isDatabaseMetadata(row.dbMetadata)) {
-      cache.set(row.id, row.dbMetadata);
+    try {
+      const { dbMetadata } = await fetchConnectionSchema(
+        row.dbType as DatabaseType,
+        row.dbUri,
+      );
+      if (!isDatabaseMetadata(dbMetadata)) {
+        throw new Error("Live schema fetch returned an invalid schema payload.");
+      }
+
+      await prisma.databaseConnection.update({
+        where: { id: row.id },
+        data: {
+          dbMetadata: dbMetadata as unknown as Prisma.InputJsonValue,
+          schemaSyncedAt: new Date(),
+          schemaSyncStatus: "ready",
+          schemaSyncError: null,
+        },
+      });
+      cache.set(row.id, dbMetadata);
       loaded += 1;
+    } catch (error) {
+      failed += 1;
+      const message = errorText(error);
+      console.warn(
+        `Schema load failed for connection ${row.name} (${row.id}): ${message}`,
+      );
+      try {
+        await prisma.databaseConnection.update({
+          where: { id: row.id },
+          data: {
+            schemaSyncStatus: "failed",
+            schemaSyncError: message,
+          },
+        });
+      } catch (updateError) {
+        console.warn(
+          `Could not record schema failure for ${row.id}: ${errorText(updateError)}`,
+        );
+      }
     }
   }
-  return loaded;
+
+  return { loaded, failed };
 }
 
 export type EnsureSchemaConnection = {
