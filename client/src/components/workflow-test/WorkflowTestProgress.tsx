@@ -12,6 +12,19 @@ import { Button } from "../ui/Button";
 import { LiveFlaskIcon } from "./LiveFlaskIcon";
 import { WorkflowTestProgressBar } from "./WorkflowTestProgressBar";
 
+function GoldenLiveAccuracy({ results }: { results: QueryRunResult[] }) {
+  const pass = results.filter((result) => result.goldenStatus === "PASS").length;
+  const fail = results.filter((result) => result.goldenStatus === "FAIL").length;
+  const infra = results.filter((result) => result.goldenStatus === "INFRA_ERROR").length;
+  const scored = pass + fail;
+  const accuracy = scored === 0 ? "—" : `${Math.round((pass / scored) * 1000) / 10}%`;
+  return (
+    <p className="text-xs text-muted-foreground" aria-live="polite">
+      Accuracy {accuracy} · {infra} infrastructure
+    </p>
+  );
+}
+
 interface Props {
   testName: string;
   groupName?: string;
@@ -159,6 +172,10 @@ export function WorkflowTestProgress({
           <span className="font-medium text-foreground">Activity:</span>{" "}
           {latestActivity}
         </p>
+      )}
+
+      {liveResults.some((result) => result.goldenStatus) && (
+        <GoldenLiveAccuracy results={liveResults} />
       )}
 
       {liveResults.length > 0 && (

@@ -153,6 +153,7 @@ export function parseWorkflowTestJson(
   }
 
   const groups: StressTestGroupInput[] = [];
+  const seenQueryKeys = new Set<string>();
 
   for (let i = 0; i < record.groups.length; i += 1) {
     const group = record.groups[i];
@@ -172,6 +173,20 @@ export function parseWorkflowTestJson(
         ok: false,
         error: `groups[${i}].queries must be a string or array of strings / { query } objects.`,
       };
+    }
+
+    if (Array.isArray(groupRecord.queries)) {
+      for (let n = 0; n < groupRecord.queries.length; n += 1) {
+        const query = normalizeQueryEntry(groupRecord.queries[n]);
+        if (!query) {
+          return { ok: false, error: `groups[${i}] queries[${n}] is empty` };
+        }
+        const queryKey = `${name}::${query.trim().replace(/\s+/g, " ")}`;
+        if (seenQueryKeys.has(queryKey)) {
+          return { ok: false, error: `Duplicate queryKey ${queryKey}` };
+        }
+        seenQueryKeys.add(queryKey);
+      }
     }
 
     const queriesText = queriesToText(groupRecord.queries) ?? "";

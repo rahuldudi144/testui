@@ -35,6 +35,14 @@ describe("workflowTestRunPersistence", () => {
     ]);
   });
 
+  test("collectRemainingItems keeps a query until every repeat exists", () => {
+    const planned = [{ groupName: "A", query: "q1" }];
+    expect(collectRemainingItems(planned, [result("A", "q1")], 2)).toEqual(planned);
+    expect(
+      collectRemainingItems(planned, [result("A", "q1"), result("A", "q1")], 2),
+    ).toEqual([]);
+  });
+
   test("parsePlannedItems reads plannedItems from summary", () => {
     const summary = buildWorkflowRunSummary(
       [],

@@ -21,6 +21,7 @@ model User {
   workflowTests    WorkflowTest[]
   workflowTestRuns WorkflowTestRun[]
   queryExecutions  QueryExecution[]
+  goldenSets       GoldenSet[]
 }
 
 model AgentProfile {
@@ -107,6 +108,8 @@ model WorkflowTest {
   databaseConnectionId String?
   databaseConnection   DatabaseConnection? @relation(fields: [databaseConnectionId], references: [id], onDelete: SetNull)
   suiteKey             String?
+  goldenSetId          String?
+  goldenSet            GoldenSet?          @relation(fields: [goldenSetId], references: [id], onDelete: SetNull)
   dryRun               Boolean             @default(false)
   delayMs              Int                 @default(0)
   createdAt            DateTime            @default(now())
@@ -170,6 +173,12 @@ model WorkflowTestRun {
   database        Json
   summary         Json
   results         Json
+  fingerprintStatus String?
+  repeats         Int                 @default(1)
+  infraErrorCount Int                 @default(0)
+  goldenFileHash  String?
+  suiteFileHash   String?
+  stopReason      String?
   ranAt           DateTime            @default(now())
   updatedAt       DateTime            @updatedAt
   sourcedQueries  WorkflowTestQuery[]
@@ -177,6 +186,22 @@ model WorkflowTestRun {
 
   @@index([userId, ranAt(sort: Desc)])
   @@index([workflowTestId, ranAt(sort: Desc)])
+}
+
+model GoldenSet {
+  id            String         @id @default(cuid())
+  userId        String
+  user          User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name          String
+  fileHash      String
+  schemaVersion Int
+  fingerprint   Json?
+  itemCount     Int
+  content       Json
+  createdAt     DateTime       @default(now())
+  workflowTests WorkflowTest[]
+
+  @@index([userId, createdAt(sort: Desc)])
 }
 
 enum QueryExecutionSource {

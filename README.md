@@ -101,6 +101,7 @@ Serves the built client and API from port `4000` (or `TESTUI_PORT`).
 
 - **App DB** (Docker Postgres on port 5555): users, sessions, conversations, workflow tests, and results via Prisma.
 - **Query DB** (`DB_AGENT_DB_URI` in `backend/.env`): the only database the agent reads. Chat and each suite item use the same `DatabaseAgent` call as the main app, including the startup schema in the SQL system prompt and the last `ASK_CHAT_HISTORY_MESSAGE_LIMIT` messages.
+- **Golden scoring** stays in this app. Upload a suite and a golden file on Setup. `TESTUI_GOLDEN_PG_SCHEMA` (default `public`) and optional `TESTUI_SCORING_DB_URI` are read only for the fingerprint and the duplicate-column fallback.
 - **Agent**: imported from `../../index.js`. The model and API key come from `backend/.env`.
 
 ## Troubleshooting

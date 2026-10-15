@@ -251,6 +251,39 @@ function ResultInspector({ result }: { result: QueryRunResult }) {
         <InspectCodeBlock value={result.query} />
       </InspectSection>
 
+      {result.goldenStatus && (
+        <InspectSection title="Golden score">
+          <InspectMetaGrid
+            items={[
+              { label: "Golden status", value: result.goldenStatus },
+              { label: "Reason", value: result.goldenReason || "—" },
+              {
+                label: "Matched alternative",
+                value:
+                  result.matchedAlternative === null || result.matchedAlternative === undefined
+                    ? "—"
+                    : `${result.matchedAlternative + 1} of ${result.goldenAcceptedCount ?? "?"}`,
+              },
+              { label: "Run", value: String(result.runIndex ?? 1) },
+            ]}
+          />
+          <div className="mt-3 grid gap-3 md:grid-cols-2">
+            <div>
+              <p className="mb-1 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+                Expected
+              </p>
+              <InspectCodeBlock value={JSON.stringify(result.expectedPreview ?? null, null, 2)} />
+            </div>
+            <div>
+              <p className="mb-1 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+                Actual
+              </p>
+              <InspectCodeBlock value={JSON.stringify(result.gotPreview ?? null, null, 2)} />
+            </div>
+          </div>
+        </InspectSection>
+      )}
+
       {result.generatedSql && (
         <InspectSection title="Generated SQL">
           <InspectCodeBlock value={result.generatedSql} language="sql" />
@@ -315,6 +348,9 @@ export function WorkflowTestReport({
   const [filter, setFilter] = useState<StatusFilter>("all");
   const [categoryFilter, setCategoryFilter] = useState<string>("all");
   const [mismatchOnly, setMismatchOnly] = useState(false);
+  const [goldenFilter, setGoldenFilter] = useState("all");
+  const [reasonFilter, setReasonFilter] = useState("all");
+  const [querySearch, setQuerySearch] = useState("");
   const [expandedKey, setExpandedKey] = useState<string | null>(null);
   const [page, setPage] = useState(0);
   const [importNotice, setImportNotice] = useState<string | null>(null);
@@ -354,6 +390,14 @@ export function WorkflowTestReport({
     }
     return [...keys].sort();
   }, [report.results, summary.byCategory]);
+
+  const reasonOptions = useMemo(() => {
+    const keys = new Set<string>();
+    for (const result of report.results) {
+      if (result.goldenReason) keys.add(result.goldenReason);
+    }
+    return [...keys].sort();
+  }, [report.results]);
 
   const categoryRows = useMemo(() => {
     if (summary.byCategory && Object.keys(summary.byCategory).length > 0) {
@@ -466,14 +510,25 @@ export function WorkflowTestReport({
         const expected = expectedOf(r);
         if (!expected || outcomesMatch(expected, r.actualOutcome)) return false;
       }
+      if (goldenFilter !== "all" && (r.goldenStatus ?? "none") !== goldenFilter) return false;
+      if (reasonFilter !== "all" && (r.goldenReason ?? "") !== reasonFilter) return false;
+      if (querySearch.trim()) {
+        const needle = querySearch.trim().toLowerCase();
+        if (
+          !r.query.toLowerCase().includes(needle) &&
+          !r.groupName.toLowerCase().includes(needle)
+        ) {
+          return false;
+        }
+      }
       return true;
     });
-  }, [filter, categoryFilter, mismatchOnly, report.results]);
+  }, [filter, categoryFilter, mismatchOnly, goldenFilter, reasonFilter, querySearch, report.results]);
 
   useEffect(() => {
     setPage(0);
     setExpandedKey(null);
-  }, [filter, categoryFilter, mismatchOnly, report.runId]);
+  }, [filter, categoryFilter, mismatchOnly, goldenFilter, reasonFilter, querySearch, report.runId]);
 
   const pageCount = Math.max(1, Math.ceil(filtered.length / RESULTS_PAGE_SIZE));
   const safePage = Math.min(page, pageCount - 1);
@@ -506,6 +561,44 @@ export function WorkflowTestReport({
 
   return (
     <div className="space-y-6">
+      {summary.golden?.unsafe && (
+        <Alert variant="error">
+          The database changed during a read-only group. Affected results are marked db_modified.
+        </Alert>
+      )}
+      {summary.stopReason === "infra_circuit_breaker" && (
+        <Alert variant="error">
+          Stopped after 5 consecutive infrastructure errors. This run is partial.
+        </Alert>
+      )}
+      {summary.golden && (
+        <div className="rounded-lg border border-border p-4 text-sm">
+          <p className="font-medium text-foreground">Golden summary</p>
+          <p className="mt-1 text-xs text-muted-foreground">
+            Accuracy {summary.golden.accuracy === null ? "—" : `${Math.round(summary.golden.accuracy * 1000) / 10}%`}
+            {" · "}
+            Raw pass {summary.golden.rawPassRate === null ? "—" : `${Math.round(summary.golden.rawPassRate * 1000) / 10}%`}
+            {" · "}
+            pass^k {summary.golden.passCaretK === null ? "—" : `${Math.round(summary.golden.passCaretK * 1000) / 10}%`}
+            {" · "}
+            pass@k {summary.golden.passAtK === null ? "—" : `${Math.round(summary.golden.passAtK * 1000) / 10}%`}
+          </p>
+          <p className="mt-2 text-xs text-muted-foreground">
+            {Object.entries(summary.golden.counts)
+              .map(([status, count]) => `${status} ${count}`)
+              .join(" · ") || "No scored results"}
+          </p>
+          {summary.golden.chains.length > 0 && (
+            <ul className="mt-2 space-y-1 text-xs text-muted-foreground">
+              {summary.golden.chains.map((chain) => (
+                <li key={chain.name}>
+                  {chain.name}: {chain.passed ? "passed" : "failed"} ({chain.turns.join(" → ")})
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <h2 className="text-lg font-semibold text-foreground">{report.testName}</h2>
@@ -763,6 +856,40 @@ export function WorkflowTestReport({
             </option>
           ))}
         </select>
+        <select
+          className="h-8 rounded-md border border-input bg-background px-2 text-xs"
+          value={goldenFilter}
+          onChange={(event) => setGoldenFilter(event.target.value)}
+          aria-label="Filter by golden status"
+        >
+          <option value="all">All golden statuses</option>
+          {["PASS", "FAIL", "INFRA_ERROR", "UNVERIFIED", "NOT_SCORED", "NOT_RUN"].map((status) => (
+            <option key={status} value={status}>
+              {status}
+            </option>
+          ))}
+        </select>
+        <select
+          className="h-8 rounded-md border border-input bg-background px-2 text-xs"
+          value={reasonFilter}
+          onChange={(event) => setReasonFilter(event.target.value)}
+          aria-label="Filter by golden reason"
+        >
+          <option value="all">All reasons</option>
+          {reasonOptions.map((reason) => (
+            <option key={reason} value={reason}>
+              {reason}
+            </option>
+          ))}
+        </select>
+        <input
+          type="search"
+          value={querySearch}
+          onChange={(event) => setQuerySearch(event.target.value)}
+          placeholder="Search query or group"
+          aria-label="Search results"
+          className="h-8 min-w-40 rounded-md border border-input bg-background px-2 text-xs"
+        />
         <label className="flex items-center gap-2 text-xs text-muted-foreground">
           <input
             type="checkbox"
@@ -788,6 +915,8 @@ export function WorkflowTestReport({
             <TableHead>Query</TableHead>
             <TableHead>Category</TableHead>
             <TableHead>Status</TableHead>
+            <TableHead>Golden</TableHead>
+            <TableHead>Reason</TableHead>
             <TableHead>Expected</TableHead>
             <TableHead>Actual</TableHead>
             <TableHead>History</TableHead>
@@ -903,6 +1032,10 @@ const ResultTableRows = memo(function ResultTableRows({
             {statusLabel(result.status)}
           </Badge>
         </TableCell>
+        <TableCell className="text-xs">{result.goldenStatus ?? "—"}</TableCell>
+        <TableCell className="max-w-[140px] truncate text-xs" title={result.goldenReason}>
+          {result.goldenReason || "—"}
+        </TableCell>
         <TableCell className="text-xs text-muted-foreground">
           {formatOutcomeLabel(expected)}
         </TableCell>
@@ -937,7 +1070,7 @@ const ResultTableRows = memo(function ResultTableRows({
       </TableRow>
       {expanded && (
         <TableRow className="bg-muted/20">
-          <TableCell colSpan={13}>
+          <TableCell colSpan={15}>
             <ResultInspector result={result} />
           </TableCell>
         </TableRow>

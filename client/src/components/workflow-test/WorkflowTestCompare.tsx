@@ -506,6 +506,7 @@ export function WorkflowTestCompare({ refreshToken, onError }: Props) {
                 <TableHead>A status</TableHead>
                 <TableHead>B status</TableHead>
                 <TableHead>Status</TableHead>
+                <TableHead>pass^k</TableHead>
                 <TableHead>Answer</TableHead>
                 <TableHead>A tokens</TableHead>
                 <TableHead>B tokens</TableHead>
@@ -615,6 +616,15 @@ export function WorkflowTestCompare({ refreshToken, onError }: Props) {
                         )}
                       </TableCell>
                       <TableCell>
+                        {row.passKMatch === undefined ? (
+                          <Badge variant="outline" className="normal-case">—</Badge>
+                        ) : row.passKMatch ? (
+                          <Badge variant="success" className="normal-case">same</Badge>
+                        ) : (
+                          <Badge variant="destructive" className="normal-case">flip</Badge>
+                        )}
+                      </TableCell>
+                      <TableCell>
                         {row.a && row.b ? (
                           row.answerMatch ? (
                             <Badge variant="success" className="normal-case">yes</Badge>
@@ -634,7 +644,7 @@ export function WorkflowTestCompare({ refreshToken, onError }: Props) {
                     </TableRow>
                     {expanded && (
                       <TableRow>
-                        <TableCell colSpan={12} className="bg-muted/10">
+                        <TableCell colSpan={13} className="bg-muted/10">
                           <div className="space-y-4 py-2">
                             <div>
                               <p className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">

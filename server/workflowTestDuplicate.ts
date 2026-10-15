@@ -109,6 +109,7 @@ export async function upsertWorkflowTest(
     dryRun: boolean;
     delayMs: number;
     suiteKey?: string | null;
+    goldenSetId?: string | null;
   },
 ): Promise<{ id: string; suiteKey: string; agentProfileId: string | null }> {
   const existing = await prisma.workflowTest.findFirst({
@@ -126,6 +127,7 @@ export async function upsertWorkflowTest(
         dryRun: input.dryRun,
         delayMs: input.delayMs,
         databaseConnectionId: input.databaseConnectionId ?? null,
+        ...(input.goldenSetId ? { goldenSetId: input.goldenSetId } : {}),
       },
     });
     return {
@@ -144,6 +146,7 @@ export async function upsertWorkflowTest(
       dryRun: input.dryRun,
       delayMs: input.delayMs,
       suiteKey: input.suiteKey ?? undefined,
+      goldenSetId: input.goldenSetId ?? undefined,
     },
   });
 

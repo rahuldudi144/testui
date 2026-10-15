@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   assertPlannedMatchesConfigured,
   parseQueries,
+  suiteImportError,
 } from "./parseStressQueries.js";
 import { parseWorkflowTestJson } from "../client/src/lib/parseWorkflowTestJson.ts";
 
@@ -22,6 +23,32 @@ describe("parseQueries", () => {
     expect(parseQueries("List hospitals in Delhi, Mumbai, and Chennai")).toEqual([
       "List hospitals in Delhi, Mumbai, and Chennai",
     ]);
+  });
+});
+
+describe("suiteImportError", () => {
+  test("rejects an empty array entry and a duplicate query key", () => {
+    expect(
+      suiteImportError([{ name: "Standard", queries: ["ok", "  "] }]),
+    ).toBe("groups[0] queries[1] is empty");
+    expect(
+      suiteImportError([
+        { name: "Standard", queries: ["How many claims in Delhi, Mumbai?"] },
+        { name: "Standard", queries: ["How many claims in Delhi, Mumbai?"] },
+      ]),
+    ).toBe("Duplicate queryKey Standard::How many claims in Delhi, Mumbai?");
+  });
+
+  test("keeps an empty queries array and does not split on commas", () => {
+    expect(suiteImportError([{ name: "Scaffold", queries: [] }])).toBeNull();
+    expect(
+      suiteImportError([
+        {
+          name: "Standard",
+          queries: ["How many claims in Delhi, Mumbai?", { query: "Show status in ('A', 'B')" }],
+        },
+      ]),
+    ).toBeNull();
   });
 });
 

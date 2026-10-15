@@ -61,6 +61,38 @@ export function configuredEntryCount(queries: unknown): number {
   return 0;
 }
 
+function suiteQueryKey(groupName: string, query: string): string {
+  return `${groupName}::${query.trim().replace(/\s+/g, " ")}`;
+}
+
+/**
+ * Array suite entries are one query each. Reject empties and duplicate
+ * `group::query` keys. Newline splitting stays in `parseQueries` for textarea
+ * strings, which are not checked here.
+ */
+export function suiteImportError(
+  groups: Array<{ name?: string; queries?: unknown }>,
+): string | null {
+  const seen = new Set<string>();
+  for (let i = 0; i < groups.length; i += 1) {
+    const group = groups[i];
+    const name = group?.name?.trim();
+    if (!name || !Array.isArray(group.queries)) continue;
+    for (let n = 0; n < group.queries.length; n += 1) {
+      const query = normalizeQueryEntry(group.queries[n]);
+      if (!query) {
+        return `groups[${i}] queries[${n}] is empty`;
+      }
+      const key = suiteQueryKey(name, query);
+      if (seen.has(key)) {
+        return `Duplicate queryKey ${key}`;
+      }
+      seen.add(key);
+    }
+  }
+  return null;
+}
+
 export function assertPlannedMatchesConfigured(
   configured: number,
   planned: number,

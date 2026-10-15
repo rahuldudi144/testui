@@ -49,6 +49,10 @@ const envSchema = z
     DB_AGENT_OLLAMA_BASE_URL: z.string().optional(),
     DB_AGENT_DB_TYPE: z.enum(["postgres", "mysql"]).optional(),
     DB_AGENT_DB_URI: z.string().optional(),
+    /** Postgres schema used when fingerprinting golden tables. */
+    TESTUI_GOLDEN_PG_SCHEMA: z.string().default("public"),
+    /** Optional read-only URI for scoring fallback and fingerprints. */
+    TESTUI_SCORING_DB_URI: z.string().optional(),
     ASK_CHAT_HISTORY_MESSAGE_LIMIT: z.preprocess(
       (value) => (value === undefined || value === "" ? 15 : value),
       z.coerce.number().int().min(0).max(100),

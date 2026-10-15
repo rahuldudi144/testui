@@ -63,7 +63,8 @@ export function WorkflowTestJsonImport({ disabled, onImport, onError }: Props) {
             <code className="rounded bg-muted px-1 py-0.5 font-mono text-[11px]">
               queries
             </code>{" "}
-            arrays are allowed for scaffolding — add queries before running.
+            arrays are allowed for scaffolding. An empty entry or a duplicate
+            group::query key is rejected. Add queries before running.
             Optional{" "}
             <code className="rounded bg-muted px-1 py-0.5 font-mono text-[11px]">
               dryRun

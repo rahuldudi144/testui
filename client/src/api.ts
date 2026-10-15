@@ -686,6 +686,17 @@ export interface QueryRunResult {
   history?: "RESET" | "KEEP";
   stopOnFailure?: boolean;
   timeoutMs?: number;
+  goldenId?: string | null;
+  goldenStatus?: "PASS" | "FAIL" | "INFRA_ERROR" | "NOT_RUN" | "NOT_SCORED" | "UNVERIFIED";
+  goldenReason?: string;
+  matchedAlternative?: number | null;
+  gotPreview?: unknown;
+  expectedPreview?: unknown;
+  goldenAttempts?: number;
+  runIndex?: number;
+  goldenConversation?: string | null;
+  goldenTurn?: number | null;
+  goldenAcceptedCount?: number;
 }
 
 export type WorkflowTestRunLifecycleStatus =
@@ -736,6 +747,18 @@ export interface WorkflowTestSummary {
   runStatus?: WorkflowTestRunLifecycleStatus;
   plannedQueries?: number;
   plannedItems?: PlannedQueryItem[];
+  stopReason?: string;
+  repeats?: number;
+  golden?: {
+    accuracy: number | null;
+    rawPassRate: number | null;
+    passAtK: number | null;
+    passCaretK: number | null;
+    counts: Record<string, number>;
+    reasonHistogram: Record<string, number>;
+    chains: Array<{ name: string; passed: boolean; turns: string[] }>;
+    unsafe: boolean;
+  };
 }
 
 export interface WorkflowTestCompletePayload {
@@ -805,7 +828,8 @@ export function isResumableWorkflowRun(
 ): boolean {
   const planned = report.summary.plannedQueries ?? 0;
   const completed = report.results.length;
-  if (!report.runId || planned <= 0 || completed >= planned) return false;
+  const need = Math.max(1, report.summary.repeats ?? 1) * planned;
+  if (!report.runId || planned <= 0 || completed >= need) return false;
   const status = report.summary.runStatus;
   return (
     status === "running" ||
@@ -947,6 +971,52 @@ export function isStreamDisconnectError(error: unknown): boolean {
   );
 }
 
+export interface GoldenUploadResult {
+  id: string;
+  name: string;
+  fileHash: string;
+  schemaVersion: number;
+  itemCount: number;
+  warnings: string[];
+  errors: string[];
+}
+
+export interface GoldenPreflightCheck {
+  id: "suite" | "golden" | "join" | "fingerprint";
+  status: "pass" | "warn" | "block";
+  messages: string[];
+}
+
+export interface GoldenPreflightReport {
+  checks: GoldenPreflightCheck[];
+  blocked: boolean;
+  fingerprintBlocked: boolean;
+  onlyFingerprintBlocked: boolean;
+  fingerprintStatus: "none" | "ok" | "warn" | "block";
+  schemaHash: string | null;
+  join: { matched: number; notScored: string[]; orphaned: string[] };
+}
+
+export function uploadGoldenSet(input: {
+  name: string;
+  content: unknown;
+}): Promise<GoldenUploadResult> {
+  return request<GoldenUploadResult>("/api/workflow-test/golden", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function preflightGolden(input: {
+  goldenSetId: string;
+  groups: Array<{ name: string; queries: string[] }>;
+}): Promise<GoldenPreflightReport> {
+  return request<GoldenPreflightReport>("/api/workflow-test/preflight", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
 export async function runWorkflowTest(
   input: {
     testName: string;
@@ -961,6 +1031,12 @@ export async function runWorkflowTest(
     dryRun?: boolean;
     delayMs?: number;
     databaseConnectionId?: string | null;
+    goldenSetId?: string | null;
+    repeats?: number;
+    retryInfra?: boolean;
+    stopOnCircuitBreaker?: boolean;
+    fingerprintOverride?: boolean;
+    suiteFileHash?: string | null;
   },
   handlers: WorkflowTestHandlers,
   signal?: AbortSignal,

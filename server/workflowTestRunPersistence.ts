@@ -93,16 +93,18 @@ export function resolveWatchPlannedTotal(input: {
 export function collectRemainingItems(
   plannedItems: PlannedQueryItem[],
   results: QueryRunResult[],
+  repeats = 1,
 ): PlannedQueryItem[] {
-  const completedKeys = new Set(
-    results.map(
-      (result) =>
-        normalizeQueryRunResult(result).queryKey ??
-        buildQueryKey(result.groupName, result.query),
-    ),
-  );
+  const need = Math.min(5, Math.max(1, Math.trunc(repeats)));
+  const counts = new Map<string, number>();
+  for (const result of results) {
+    const key =
+      normalizeQueryRunResult(result).queryKey ??
+      buildQueryKey(result.groupName, result.query);
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+  }
   return plannedItems.filter(
-    (item) => !completedKeys.has(buildQueryKey(item.groupName, item.query)),
+    (item) => (counts.get(buildQueryKey(item.groupName, item.query)) ?? 0) < need,
   );
 }
 
@@ -112,7 +114,8 @@ export function isResumableRunSummary(
 ): boolean {
   const planned = summary.plannedQueries ?? 0;
   const status = summary.runStatus;
-  if (planned <= 0 || completedCount >= planned) return false;
+  const need = Math.max(1, summary.repeats ?? 1) * planned;
+  if (planned <= 0 || completedCount >= need) return false;
   return (
     status === "running" ||
     status === "partial" ||
@@ -160,13 +163,17 @@ export async function finalizeOrphanedRunningRun(
 
   const plannedItems = parsePlannedItems(run.summary);
   const plannedCount = summary.plannedQueries ?? plannedItems.length;
-  const runStatus = orphanedRunTerminalStatus(results.length, plannedCount);
-  const nextSummary = buildWorkflowRunSummary(
-    results,
-    plannedCount,
-    runStatus,
-    plannedItems.length > 0 ? plannedItems : summary.plannedItems,
-  );
+  const repeats = Math.max(1, run.repeats ?? 1);
+  const runStatus = orphanedRunTerminalStatus(results.length, plannedCount * repeats);
+  const nextSummary = {
+    ...buildWorkflowRunSummary(
+      results,
+      plannedCount,
+      runStatus,
+      plannedItems.length > 0 ? plannedItems : summary.plannedItems,
+    ),
+    ...(repeats > 1 ? { repeats } : {}),
+  };
 
   await prisma.workflowTestRun.update({
     where: { id: runId },

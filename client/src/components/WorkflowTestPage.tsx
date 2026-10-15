@@ -28,6 +28,12 @@ import type { ParsedWorkflowTestImport } from "../lib/parseWorkflowTestJson";
 import { PageHeader } from "./layout/PageHeader";
 import { WorkflowTestForm } from "./workflow-test/WorkflowTestForm";
 import { WorkflowTestJsonImport } from "./workflow-test/WorkflowTestJsonImport";
+import {
+  GoldenSetup,
+  runGoldenPreflight,
+  type LoadedGolden,
+} from "./workflow-test/GoldenSetup";
+import type { GoldenPreflightReport } from "../api";
 import { WorkflowTestProgress } from "./workflow-test/WorkflowTestProgress";
 import { WorkflowTestReportPanel } from "./workflow-test/WorkflowTestReportPanel";
 import { WorkflowTestCompare } from "./workflow-test/WorkflowTestCompare";
@@ -89,6 +95,11 @@ export function WorkflowTestPage({ onBack }: Props) {
   /** Setup groups came from Load failures in setup — Run writes back to linked report. */
   const [sameReportFailureMode, setSameReportFailureMode] = useState(false);
   const [localError, setLocalError] = useState<string | null>(null);
+  const [golden, setGolden] = useState<LoadedGolden | null>(null);
+  const [preflight, setPreflight] = useState<GoldenPreflightReport | null>(null);
+  const [repeats, setRepeats] = useState(1);
+  const [retryInfra, setRetryInfra] = useState(true);
+  const [stopOnCircuitBreaker, setStopOnCircuitBreaker] = useState(true);
 
   const totalQueries = countQueriesInGroups(groups);
   const error = localError ?? runnerError;
@@ -162,6 +173,10 @@ export function WorkflowTestPage({ onBack }: Props) {
         databaseConnectionId,
         dryRun,
         delayMs,
+        goldenSetId: golden?.id ?? null,
+        repeats,
+        retryInfra,
+        stopOnCircuitBreaker,
       };
     }
 
@@ -186,6 +201,29 @@ export function WorkflowTestPage({ onBack }: Props) {
     if (totalQueries === 0) {
       setLocalError("Add at least one query before running.");
       return;
+    }
+    if (golden) {
+      try {
+        const nextPreflight = await runGoldenPreflight(golden.id, config.groups);
+        setPreflight(nextPreflight);
+        const hardBlock = nextPreflight.checks.some(
+          (check) => check.status === "block" && check.id !== "fingerprint",
+        );
+        if (hardBlock || (nextPreflight.blocked && !nextPreflight.onlyFingerprintBlocked)) {
+          setLocalError("Preflight blocked the run. Fix the suite, golden file, or join before running.");
+          return;
+        }
+        if (nextPreflight.fingerprintBlocked) {
+          const confirmed = window.confirm(
+            "The database fingerprint does not match the golden file. Run anyway?",
+          );
+          if (!confirmed) return;
+          config.fingerprintOverride = true;
+        }
+      } catch (err) {
+        setLocalError(err instanceof Error ? err.message : "Preflight failed.");
+        return;
+      }
     }
     syncFormFromConfig(config);
     setLocalError(null);
@@ -218,7 +256,7 @@ export function WorkflowTestPage({ onBack }: Props) {
         })),
       ) > 0
     ) {
-      await run(config);
+      await handleRun();
       return;
     }
     if (lastConfig) {
@@ -243,6 +281,13 @@ export function WorkflowTestPage({ onBack }: Props) {
     setLocalError(null);
     clearError();
     setTab("setup");
+    if (golden) {
+      void runGoldenPreflight(golden.id, toApiGroups(data.groups))
+        .then(setPreflight)
+        .catch((err: unknown) => {
+          setLocalError(err instanceof Error ? err.message : "Preflight failed.");
+        });
+    }
   }
 
   function handleLoadSavedTest(data: {
@@ -456,7 +501,15 @@ export function WorkflowTestPage({ onBack }: Props) {
                 type="button"
                 onClick={() => void handleRun()}
                 loading={running}
-                disabled={running || totalQueries === 0}
+                disabled={
+                  running ||
+                  totalQueries === 0 ||
+                  Boolean(
+                    preflight?.checks.some(
+                      (check) => check.status === "block" && check.id !== "fingerprint",
+                    ),
+                  )
+                }
               >
                 <Play className="h-4 w-4" />
                 Run workflow test
@@ -540,6 +593,21 @@ export function WorkflowTestPage({ onBack }: Props) {
               <WorkflowTestJsonImport
                 disabled={running}
                 onImport={handleJsonImport}
+                onError={setLocalError}
+              />
+              <GoldenSetup
+                disabled={running}
+                groups={toApiGroups(groups)}
+                repeats={repeats}
+                retryInfra={retryInfra}
+                stopOnCircuitBreaker={stopOnCircuitBreaker}
+                preflight={preflight}
+                golden={golden}
+                onGoldenChange={setGolden}
+                onPreflight={setPreflight}
+                onRepeatsChange={setRepeats}
+                onRetryInfraChange={setRetryInfra}
+                onStopOnCircuitChange={setStopOnCircuitBreaker}
                 onError={setLocalError}
               />
               <WorkflowTestForm

@@ -63,6 +63,18 @@ export interface QueryRunResult {
   history?: "RESET" | "KEEP";
   stopOnFailure?: boolean;
   timeoutMs?: number;
+  goldenId?: string | null;
+  goldenStatus?: "PASS" | "FAIL" | "INFRA_ERROR" | "NOT_RUN" | "NOT_SCORED" | "UNVERIFIED";
+  goldenReason?: string;
+  matchedAlternative?: number | null;
+  gotPreview?: unknown;
+  expectedPreview?: unknown;
+  /** Infra retry count. Observability attempts stay on `attempts`. */
+  goldenAttempts?: number;
+  runIndex?: number;
+  goldenConversation?: string | null;
+  goldenTurn?: number | null;
+  goldenAcceptedCount?: number;
 }
 
 export type WorkflowRunStatus =
@@ -108,6 +120,18 @@ export interface StressTestSummary {
   runStatus?: WorkflowRunStatus;
   plannedQueries?: number;
   plannedItems?: PlannedQueryItem[];
+  stopReason?: string;
+  repeats?: number;
+  golden?: {
+    accuracy: number | null;
+    rawPassRate: number | null;
+    passAtK: number | null;
+    passCaretK: number | null;
+    counts: Record<string, number>;
+    reasonHistogram: Record<string, number>;
+    chains: Array<{ name: string; passed: boolean; turns: string[] }>;
+    unsafe: boolean;
+  };
 }
 
 interface WorkflowSummary {

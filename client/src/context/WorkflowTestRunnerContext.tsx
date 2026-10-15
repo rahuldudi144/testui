@@ -83,6 +83,12 @@ export interface WorkflowTestRunConfig {
   databaseConnectionId?: string | null;
   dryRun: boolean;
   delayMs: number;
+  goldenSetId?: string | null;
+  repeats?: number;
+  retryInfra?: boolean;
+  stopOnCircuitBreaker?: boolean;
+  fingerprintOverride?: boolean;
+  suiteFileHash?: string | null;
 }
 
 export interface WorkflowTestProgress {
@@ -669,6 +675,12 @@ export function WorkflowTestRunnerProvider({
                 dryRun: config.dryRun,
                 delayMs: config.delayMs,
                 databaseConnectionId: config.databaseConnectionId,
+                goldenSetId: config.goldenSetId,
+                repeats: config.repeats,
+                retryInfra: config.retryInfra,
+                stopOnCircuitBreaker: config.stopOnCircuitBreaker,
+                fingerprintOverride: config.fingerprintOverride,
+                suiteFileHash: config.suiteFileHash,
               },
               handlers,
               signal,

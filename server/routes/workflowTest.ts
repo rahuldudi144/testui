@@ -7,6 +7,7 @@ import {
   flattenGroupRecords,
   configuredEntryCount,
   normalizeGroups,
+  suiteImportError,
   type WorkflowTestGroupRecord,
 } from "../parseStressQueries.js";
 import {
@@ -68,6 +69,26 @@ import {
   executeQueryItem,
   persistRerunExecutions,
 } from "../workflowTestRunExecutor.js";
+import {
+  createGoldenSet,
+  loadGoldenRunContext,
+  preflightStoredGolden,
+  type GoldenRunContext,
+} from "../golden/goldenHttp.js";
+import { sha256Text } from "../golden/preflight.js";
+import {
+  clampRepeats,
+  expandRepeatItems,
+  infraBackoffMs,
+  isInfraForRetry,
+  markDbModified,
+  readDbSnapshot,
+  scoreWorkflowResult,
+  snapshotsDiffer,
+  withGoldenSummary,
+  type QueryInvokeCapture,
+} from "../golden/scoreRun.js";
+import { buildQueryKey } from "../workflowTestObservability.js";
 import {
   buildWorkflowRunSummary,
   checkpointWorkflowRun,
@@ -198,6 +219,13 @@ interface RunWorkflowTestOptions {
   delayMs: number;
   agentProfileId?: string | null;
   databaseConnectionId?: string | null;
+  goldenSetId?: string | null;
+  repeats?: number;
+  retryInfra?: boolean;
+  stopOnCircuitBreaker?: boolean;
+  fingerprintStatus?: string | null;
+  goldenFileHash?: string | null;
+  suiteFileHash?: string | null;
 }
 
 interface QueryLoopContext {
@@ -256,7 +284,29 @@ async function emitWorkflowRunComplete(
     results: QueryRunResult[];
   },
 ): Promise<void> {
-  const report = normalizeRunReport(fields);
+  let summary = withGoldenSummary(fields.summary, fields.results, null);
+  if (runId) {
+    const row = await prisma.workflowTestRun
+      .findUnique({ where: { id: runId }, select: { repeats: true } })
+      .catch(() => null);
+    if (row && row.repeats > 1) summary = { ...summary, repeats: row.repeats };
+  }
+  const report = normalizeRunReport({ ...fields, summary });
+  if (runId) {
+    const infraErrorCount = fields.results.filter(
+      (result) =>
+        result.goldenStatus === "INFRA_ERROR" || result.actualOutcome === "infra_error",
+    ).length;
+    await prisma.workflowTestRun
+      .update({
+        where: { id: runId },
+        data: {
+          infraErrorCount,
+          ...(summary.stopReason ? { stopReason: summary.stopReason } : {}),
+        },
+      })
+      .catch(() => undefined);
+  }
   const message: RunStreamEvent = {
     event: "complete",
     data: JSON.stringify(report),
@@ -275,6 +325,7 @@ async function runWorkflowQueryItems(
     query: string;
     categoryType: WorkflowTestCategoryType;
     executionOverrides: import("../workflowTestCategory.js").ExecutionPolicyOverrides | null;
+    runIndex?: number;
   }>,
   options: {
     stream: WorkflowStream;
@@ -285,6 +336,7 @@ async function runWorkflowQueryItems(
     progressOffset: number;
     plannedTotal: number;
     startMeta: Record<string, unknown>;
+    golden?: GoldenRunContext | null;
     reportFields: Omit<
       Parameters<typeof emitWorkflowRunComplete>[2],
       "summary" | "results"
@@ -301,6 +353,7 @@ async function runWorkflowQueryItems(
     plannedTotal,
     startMeta,
     reportFields,
+    golden,
   } = options;
 
   const estimatedTotalMs = estimateTotalMs({
@@ -325,9 +378,35 @@ async function runWorkflowQueryItems(
   let currentGroupId: string | null = null;
   let consecutiveInfraErrors = 0;
   const completedDurations: number[] = [];
+  let snapshotBefore: Awaited<ReturnType<typeof readDbSnapshot>> = null;
+  let snapshotGroup = "";
+
+  async function finishGroupSnapshot(): Promise<void> {
+    if (!snapshotBefore || !golden) {
+      snapshotBefore = null;
+      return;
+    }
+    const before = snapshotBefore;
+    const groupName = snapshotGroup;
+    snapshotBefore = null;
+    try {
+      const after = await readDbSnapshot(golden.scoringDbUri, golden.schema);
+      if (after && snapshotsDiffer(before, after)) {
+        const watched = new Set(
+          [...golden.byKey.values()]
+            .filter((item) => item.assert_db_unchanged && item.group === groupName)
+            .map((item) => item.queryKey),
+        );
+        markDbModified(checkpoint.results, groupName, watched);
+      }
+    } catch {
+      snapshotBefore = null;
+    }
+  }
 
   for (let index = 0; index < items.length; index += 1) {
     if (abort.isAborted()) {
+      await finishGroupSnapshot();
       await checkpointWorkflowRun(checkpoint, "cancelled", {
         dryRun: queryContext.dryRun,
         delayMs: queryContext.delayMs,
@@ -347,11 +426,19 @@ async function runWorkflowQueryItems(
 
     const item = items[index]!;
     const { groupId, groupName, query, categoryType, executionOverrides } = item;
+    const runIndex = item.runIndex ?? 1;
     const policy = resolveExecution(categoryType, executionOverrides);
 
     if (currentGroupId !== groupId) {
+      await finishGroupSnapshot();
       currentGroupId = groupId;
       historyMessages = [];
+      if (golden?.snapshotGroups.has(groupName)) {
+        snapshotGroup = groupName;
+        snapshotBefore = await readDbSnapshot(golden.scoringDbUri, golden.schema).catch(
+          () => null,
+        );
+      }
     }
 
     const messagesForInvoke =
@@ -394,6 +481,7 @@ async function runWorkflowQueryItems(
     );
 
     if (abort.isAborted()) {
+      await finishGroupSnapshot();
       await checkpointWorkflowRun(checkpoint, "cancelled", {
         dryRun: queryContext.dryRun,
         delayMs: queryContext.delayMs,
@@ -420,8 +508,14 @@ async function runWorkflowQueryItems(
       timeoutSignal,
     );
 
+    const maxExtra = golden ? (golden.retryInfra ? 2 : 0) : 2;
     let runResult: QueryRunResult | undefined;
-    for (let attempt = 0; attempt <= 2; attempt += 1) {
+    let capture: QueryInvokeCapture | null = null;
+    let goldenAttempts = 1;
+    for (let attempt = 0; attempt <= maxExtra; attempt += 1) {
+      if (attempt > 0 && golden?.retryInfra) {
+        await abortableDelay(infraBackoffMs(attempt - 1), queryContext.abortSignal);
+      }
       try {
         const executed = await executeQueryItem(
           {
@@ -437,6 +531,8 @@ async function runWorkflowQueryItems(
           { ...queryContext, dryRun: itemDryRun, abortSignal: itemAbortSignal },
         );
         runResult = executed.result;
+        capture = executed.capture;
+        goldenAttempts = attempt + 1;
       } catch (err) {
         if (isAbortError(err) && queryContext.abortSignal.aborted) {
           throw err;
@@ -465,21 +561,37 @@ async function runWorkflowQueryItems(
 
       const infra =
         runResult.actualOutcome === "infra_error" ||
-        isInfraErrorMessage(runResult.errorMessage);
-      if (!infra || attempt === 2) break;
+        isInfraErrorMessage(runResult.errorMessage) ||
+        isInfraForRetry(runResult, capture);
+      if (!infra || attempt === maxExtra) break;
     }
     if (!runResult) {
       throw new Error("Query did not produce a result.");
+    }
+    if (golden) {
+      runResult = await scoreWorkflowResult({
+        result: runResult,
+        capture,
+        item: golden.byKey.get(buildQueryKey(groupName, query)),
+        runIndex,
+        goldenAttempts,
+        scoringDbUri: golden.scoringDbUri,
+      });
+    } else {
+      runResult = { ...runResult, runIndex };
     }
 
     completedDurations.push(runResult.durationMs);
 
     const infraFailure =
+      runResult.goldenStatus === "INFRA_ERROR" ||
       runResult.actualOutcome === "infra_error" ||
       isInfraErrorMessage(runResult.errorMessage);
     consecutiveInfraErrors = infraFailure ? consecutiveInfraErrors + 1 : 0;
-    if (consecutiveInfraErrors >= 5) {
+    const stopOnCircuit = golden ? golden.stopOnCircuitBreaker : true;
+    if (consecutiveInfraErrors >= 5 && stopOnCircuit) {
       checkpoint.results.push(runResult);
+      await finishGroupSnapshot();
       await checkpointWorkflowRun(checkpoint, "partial", {
         dryRun: queryContext.dryRun,
         delayMs: queryContext.delayMs,
@@ -492,12 +604,15 @@ async function runWorkflowQueryItems(
       });
       await emitWorkflowRunComplete(stream, runId, {
         ...reportFields,
-        summary: buildWorkflowRunSummary(
-          checkpoint.results,
-          checkpoint.plannedItems.length,
-          "partial",
-          checkpoint.plannedItems,
-        ),
+        summary: {
+          ...buildWorkflowRunSummary(
+            checkpoint.results,
+            checkpoint.plannedItems.length,
+            "partial",
+            checkpoint.plannedItems,
+          ),
+          stopReason: "infra_circuit_breaker",
+        },
         results: checkpoint.results,
       });
       return "partial";
@@ -509,6 +624,7 @@ async function runWorkflowQueryItems(
         : null;
     if (fatalError && isFatalProviderError(fatalError)) {
       checkpoint.results.push(runResult);
+      await finishGroupSnapshot();
       await checkpointWorkflowRun(checkpoint, "partial", {
         dryRun: queryContext.dryRun,
         delayMs: queryContext.delayMs,
@@ -532,7 +648,10 @@ async function runWorkflowQueryItems(
       return "partial";
     }
 
-    if (policy.history === "KEEP") {
+    const nextItem = items[index + 1];
+    const lastOfQuery =
+      !nextItem || nextItem.groupId !== groupId || nextItem.query !== query;
+    if (policy.history === "KEEP" && lastOfQuery) {
       const limit = loadEnv().ASK_CHAT_HISTORY_MESSAGE_LIMIT;
       const nextHistory: Message[] = [
         ...historyMessages,
@@ -547,6 +666,7 @@ async function runWorkflowQueryItems(
 
     if (abort.isAborted()) {
       checkpoint.results.push(runResult);
+      await finishGroupSnapshot();
       await checkpointWorkflowRun(checkpoint, "cancelled", {
         dryRun: queryContext.dryRun,
         delayMs: queryContext.delayMs,
@@ -604,10 +724,11 @@ async function runWorkflowQueryItems(
     }
   }
 
+  await finishGroupSnapshot();
+
+  const expectedResults = checkpoint.plannedItems.length * (golden?.repeats ?? 1);
   const finalStatus =
-    checkpoint.results.length >= checkpoint.plannedItems.length
-      ? "completed"
-      : "partial";
+    checkpoint.results.length >= expectedResults ? "completed" : "partial";
 
   await checkpointWorkflowRun(checkpoint, finalStatus, {
     dryRun: queryContext.dryRun,
@@ -661,8 +782,8 @@ async function executeWorkflowTestRun(
   }
   const { activeDb, dbType, dbInfo, agentConfig, runnerOptions, snapshot } = setup;
 
-  const items = flattenGroupRecords(groups, groupIds);
-  if (items.length === 0) {
+  const sourceItems = flattenGroupRecords(groups, groupIds);
+  if (sourceItems.length === 0) {
     await stream.writeSSE({
       event: "error",
       data: JSON.stringify({
@@ -672,8 +793,17 @@ async function executeWorkflowTestRun(
     return;
   }
 
+  const repeats = clampRepeats(options.repeats ?? 1);
+  const golden = options.goldenSetId
+    ? await loadGoldenRunContext(userId, options.goldenSetId, {
+        repeats,
+        retryInfra: options.retryInfra !== false,
+        stopOnCircuitBreaker: options.stopOnCircuitBreaker !== false,
+      })
+    : null;
+  const items = expandRepeatItems(sourceItems, golden ? repeats : 1, []);
   const avgQueryMs = await loadAvgQueryMsForTest(userId, testId, testRow?.suiteKey);
-  const plannedItems: PlannedQueryItem[] = items.map(({ groupName, query }) => ({
+  const plannedItems: PlannedQueryItem[] = sourceItems.map(({ groupName, query }) => ({
     groupName,
     query,
   }));
@@ -697,6 +827,11 @@ async function executeWorkflowTestRun(
       database: dbInfo as unknown as Prisma.InputJsonValue,
       summary: initialSummary as unknown as Prisma.InputJsonValue,
       results: [] as unknown as Prisma.InputJsonValue,
+      fingerprintStatus: options.fingerprintStatus ?? null,
+      repeats: golden ? repeats : 1,
+      infraErrorCount: 0,
+      goldenFileHash: options.goldenFileHash ?? golden?.fileHash ?? null,
+      suiteFileHash: options.suiteFileHash ?? null,
       ranAt,
     },
   });
@@ -749,8 +884,9 @@ async function executeWorkflowTestRun(
       queryContext,
       checkpoint,
       progressOffset: 0,
-      plannedTotal: plannedItems.length,
+      plannedTotal: items.length,
       startMeta: { testName, testId, dryRun },
+      golden,
       reportFields,
     });
   } catch (err) {
@@ -788,6 +924,7 @@ async function executeResumeWorkflowTestRun(
           agentProfileId: true,
           databaseConnectionId: true,
           suiteKey: true,
+          goldenSetId: true,
         },
       },
     },
@@ -817,7 +954,8 @@ async function executeResumeWorkflowTestRun(
     return;
   }
 
-  const remaining = collectRemainingItems(plannedItems, existingResults);
+  const repeats = clampRepeats(existingRun.repeats ?? 1);
+  const remaining = collectRemainingItems(plannedItems, existingResults, repeats);
   if (remaining.length === 0) {
     await stream.writeSSE({
       event: "error",
@@ -848,7 +986,18 @@ async function executeResumeWorkflowTestRun(
     existingRun.workflowTest.suiteKey,
   );
   const groups = await loadTestGroups(existingRun.workflowTestId);
-  const remainingItems = enrichItemsWithCategory(remaining, groups);
+  const golden = existingRun.workflowTest.goldenSetId
+    ? await loadGoldenRunContext(userId, existingRun.workflowTest.goldenSetId, {
+        repeats,
+        retryInfra: true,
+        stopOnCircuitBreaker: true,
+      })
+    : null;
+  const remainingItems = expandRepeatItems(
+    enrichItemsWithCategory(remaining, groups),
+    repeats,
+    existingResults,
+  );
 
   registerActiveRun(runId, userId);
   // Do not cancel on SSE disconnect — refresh reattaches via /watch.
@@ -897,13 +1046,14 @@ async function executeResumeWorkflowTestRun(
       queryContext,
       checkpoint,
       progressOffset: existingResults.length,
-      plannedTotal: plannedItems.length,
+      plannedTotal: plannedItems.length * repeats,
       startMeta: {
         testName: existingRun.testName,
         testId: existingRun.workflowTestId,
         dryRun,
         resume: true,
       },
+      golden,
       reportFields,
     });
   } catch (err) {
@@ -948,6 +1098,7 @@ async function executeRerunFailuresInRun(
           agentProfileId: true,
           databaseConnectionId: true,
           suiteKey: true,
+          goldenSetId: true,
         },
       },
     },
@@ -1155,6 +1306,14 @@ async function executeRerunFailuresInRun(
     });
   };
 
+  const rerunGolden = existingRun.workflowTest.goldenSetId
+    ? await loadGoldenRunContext(userId, existingRun.workflowTest.goldenSetId, {
+        repeats: 1,
+        retryInfra: false,
+        stopOnCircuitBreaker: true,
+      })
+    : null;
+
   for (let index = 0; index < failedSelections.length; index += 1) {
     if (abort.isAborted()) {
       if (reruns.length > 0) {
@@ -1190,7 +1349,7 @@ async function executeRerunFailuresInRun(
       return;
     }
 
-    const { result, metrics, ranAt } = await executeQueryItem(
+    const executed = await executeQueryItem(
       {
         groupName: item.groupName,
         query: item.query,
@@ -1202,6 +1361,18 @@ async function executeRerunFailuresInRun(
       },
       queryContext,
     );
+    const metrics = executed.metrics;
+    const ranAt = executed.ranAt;
+    const result = rerunGolden
+      ? await scoreWorkflowResult({
+          result: executed.result,
+          capture: executed.capture,
+          item: rerunGolden.byKey.get(buildQueryKey(item.groupName, item.query)),
+          runIndex: executed.result.runIndex ?? 1,
+          goldenAttempts: 1,
+          scoringDbUri: rerunGolden.scoringDbUri,
+        })
+      : executed.result;
 
     reruns.push({ queryKey, result, metrics, ranAt });
     workingResults = mergeRerunResults(workingResults, [
@@ -1729,6 +1900,46 @@ workflowTestRoutes.post("/:testId/groups/:groupId/run", async (c) => {
   });
 });
 
+workflowTestRoutes.post("/golden", async (c) => {
+  const user = c.get("user");
+  const body = await c.req.json<{ name?: string; content?: unknown }>();
+  const stored = await createGoldenSet(user.id, body);
+  if (stored.errors.length > 0) {
+    return c.json({ error: stored.errors.join(" "), ...stored }, 400);
+  }
+  return c.json(stored);
+});
+
+workflowTestRoutes.post("/preflight", async (c) => {
+  const user = c.get("user");
+  const body = await c.req.json<{
+    goldenSetId?: string;
+    groups?: Array<{ name?: string; queries?: unknown }>;
+  }>();
+  const goldenSetId = body.goldenSetId?.trim();
+  if (!goldenSetId) {
+    return c.json({ error: "A golden answer set is required." }, 400);
+  }
+  const importError = suiteImportError(body.groups ?? []);
+  const groups = importError ? body.groups ?? [] : normalizeGroups(body.groups ?? []);
+  const preflight = await preflightStoredGolden({
+    userId: user.id,
+    goldenSetId,
+    groups,
+  });
+  if ("error" in preflight) {
+    return c.json({ error: preflight.error }, 400);
+  }
+  if (importError) {
+    preflight.checks = preflight.checks.map((check) =>
+      check.id === "suite" ? { ...check, status: "block", messages: [importError] } : check,
+    );
+    preflight.blocked = true;
+    preflight.onlyFingerprintBlocked = false;
+  }
+  return c.json(preflight);
+});
+
 workflowTestRoutes.get("/:testId", async (c) => {
   const user = c.get("user");
   const testId = c.req.param("testId");
@@ -1826,11 +2037,22 @@ workflowTestRoutes.post("/run", async (c) => {
     }>;
     queryCount?: number;
     groupIds?: string[];
+    goldenSetId?: string | null;
+    repeats?: number;
+    retryInfra?: boolean;
+    stopOnCircuitBreaker?: boolean;
+    fingerprintOverride?: boolean;
+    suiteFileHash?: string | null;
   }>();
 
   const testName = body.testName?.trim();
   if (!testName) {
     return c.json({ error: "A non-empty test name is required." }, 400);
+  }
+
+  const importError = suiteImportError(body.groups ?? []);
+  if (importError) {
+    return c.json({ error: importError }, 400);
   }
 
   const allManualGroups = normalizeGroups(body.groups ?? [], { keepEmpty: true });
@@ -1867,12 +2089,42 @@ workflowTestRoutes.post("/run", async (c) => {
   const agentProfileId = body.agentProfileId?.trim() || null;
   const databaseConnectionId = body.databaseConnectionId?.trim() || null;
 
+  const goldenSetId = body.goldenSetId?.trim() || null;
+  const repeats = clampRepeats(body.repeats ?? 1);
+  let fingerprintStatus: string | null = null;
+  let goldenFileHash: string | null = null;
+  if (goldenSetId) {
+    const preflight = await preflightStoredGolden({
+      userId: user.id,
+      goldenSetId,
+      groups: runnableManualGroups,
+    });
+    if ("error" in preflight) {
+      return c.json({ error: preflight.error }, 400);
+    }
+    const blocked =
+      preflight.blocked && !(body.fingerprintOverride && preflight.onlyFingerprintBlocked);
+    if (blocked) {
+      return c.json(
+        { error: "Preflight blocked the run.", preflight },
+        400,
+      );
+    }
+    fingerprintStatus = preflight.fingerprintStatus;
+    const owned = await prisma.goldenSet.findFirst({
+      where: { id: goldenSetId, userId: user.id },
+      select: { fileHash: true },
+    });
+    goldenFileHash = owned?.fileHash ?? null;
+  }
+
   const savedTest = await upsertWorkflowTest(user.id, {
     testName,
     agentProfileId,
     databaseConnectionId,
     dryRun,
     delayMs,
+    goldenSetId,
   });
 
   if (allManualGroups.length > 0) {
@@ -1900,6 +2152,14 @@ workflowTestRoutes.post("/run", async (c) => {
           delayMs,
           agentProfileId: agentProfileId ?? savedTest.agentProfileId,
           databaseConnectionId,
+          goldenSetId,
+          repeats,
+          retryInfra: body.retryInfra !== false,
+          stopOnCircuitBreaker: body.stopOnCircuitBreaker !== false,
+          fingerprintStatus,
+          goldenFileHash,
+          suiteFileHash:
+            body.suiteFileHash?.trim() || sha256Text(JSON.stringify(body.groups ?? [])),
         },
         stream,
       );

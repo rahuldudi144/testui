@@ -19,6 +19,8 @@ import type { profileAgentConfig } from "./userAgent.js";
 import { enrichQueryRunResult } from "./workflowTestObservability.js";
 import { subscribeWorkflowActivity } from "./workflowTestActivity.js";
 import { isAbortError } from "../../utils/abort.js";
+import { AgentError } from "../../utils/errors.js";
+import type { QueryInvokeCapture } from "./golden/scoreRun.js";
 import type {
   WorkflowExpectedOutcome,
   WorkflowTestCategoryType,
@@ -117,7 +119,12 @@ export interface QueryItem {
 export async function executeQueryItem(
   item: QueryItem,
   context: QueryContext,
-): Promise<{ result: QueryRunResult; metrics: ReturnType<typeof extractMetricsFromDebug>; ranAt: Date }> {
+): Promise<{
+  result: QueryRunResult;
+  metrics: ReturnType<typeof extractMetricsFromDebug>;
+  ranAt: Date;
+  capture: QueryInvokeCapture;
+}> {
   if (context.abortSignal?.aborted) {
     throw new DOMException("The operation was aborted.", "AbortError");
   }
@@ -146,6 +153,10 @@ export async function executeQueryItem(
       result: enrichQueryRunResult(runResult, EMPTY_METRICS, ranAt),
       metrics: EMPTY_METRICS,
       ranAt,
+      capture: {
+        executionResult: null,
+        errorCode: err instanceof AgentError ? err.code : null,
+      },
     };
   }
 }
@@ -153,7 +164,12 @@ export async function executeQueryItem(
 async function runQueryItem(
   item: QueryItem,
   context: QueryContext,
-): Promise<{ result: QueryRunResult; metrics: ReturnType<typeof extractMetricsFromDebug>; ranAt: Date }> {
+): Promise<{
+  result: QueryRunResult;
+  metrics: ReturnType<typeof extractMetricsFromDebug>;
+  ranAt: Date;
+  capture: QueryInvokeCapture;
+}> {
   const { groupName, query } = item;
   const {
     userId,
@@ -188,6 +204,7 @@ async function runQueryItem(
   const ranAt = new Date();
   let runResult: QueryRunResult;
   let debug: unknown;
+  let capture: QueryInvokeCapture = { executionResult: null, errorCode: null };
 
   try {
     const { result, stateHistory } = await invokeWithHistory(
@@ -202,6 +219,11 @@ async function runQueryItem(
         abortSignal,
       },
     );
+
+    capture = {
+      executionResult: result.executionResult ?? null,
+      errorCode: null,
+    };
 
     const generatedSql =
       result.generatedSql ?? extractSqlFromMarkdown(result.markdownResponse);
@@ -250,6 +272,10 @@ async function runQueryItem(
       agentConfig,
     );
 
+    capture = {
+      executionResult: null,
+      errorCode: err instanceof AgentError ? err.code : null,
+    };
     runResult = analyzeStressRunResult({
       query,
       groupName,
@@ -273,7 +299,7 @@ async function runQueryItem(
   const metrics = extractMetricsFromDebug(debug);
   const enriched = enrichQueryRunResult(runResult, metrics, ranAt);
 
-  return { result: enriched, metrics, ranAt };
+  return { result: enriched, metrics, ranAt, capture };
 }
 
 async function persistSingleWorkflowExecution(

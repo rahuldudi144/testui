@@ -74,7 +74,28 @@ describe("parseWorkflowTestJson", () => {
     });
   });
 
-  test("rejects invalid expectedOutcome values via normalize (drops them)", () => {
+  test("rejects empty array entries and duplicate query keys", () => {
+    const empty = parseWorkflowTestJson({
+      testName: "Claims",
+      groups: [{ name: "Standard", queries: ["ok", ""] }],
+    });
+    expect(empty.ok).toBe(false);
+    if (!empty.ok) expect(empty.error).toBe("groups[0] queries[1] is empty");
+
+    const duplicate = parseWorkflowTestJson({
+      testName: "Claims",
+      groups: [
+        { name: "Standard", queries: ["How many claims in Delhi, Mumbai?"] },
+        { name: "Standard", queries: [{ query: "How many claims in Delhi, Mumbai?" }] },
+      ],
+    });
+    expect(duplicate.ok).toBe(false);
+    if (!duplicate.ok) {
+      expect(duplicate.error).toContain("Duplicate queryKey Standard::");
+    }
+  });
+
+  test("maps the legacy HALLUCINATION outcome to SCHEMA_NOT_FOUND", () => {
     const result = parseWorkflowTestJson({
       testName: "Bad expected",
       groups: [
@@ -88,7 +109,8 @@ describe("parseWorkflowTestJson", () => {
     });
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    // Invalid outcome ignored → no execution overrides stored
-    expect(result.data.groups[0]?.execution).toBeUndefined();
+    expect(result.data.groups[0]?.execution).toEqual({
+      expectedOutcome: "SCHEMA_NOT_FOUND",
+    });
   });
 });

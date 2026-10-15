@@ -8,6 +8,7 @@ export interface CompareRow {
   b?: QueryRunResult;
   statusMatch: boolean;
   answerMatch?: boolean;
+  passKMatch?: boolean;
 }
 
 export function finalAnswerText(result?: QueryRunResult): string | undefined {
@@ -42,6 +43,15 @@ export function resultQueryKey(result: QueryRunResult): string {
   return `${result.groupName}::${normalized}`;
 }
 
+function passCaretK(results: QueryRunResult[], queryKey: string): "PASS" | "FAIL" | undefined {
+  const rows = results.filter((result) => resultQueryKey(result) === queryKey);
+  const scored = rows.filter(
+    (result) => result.goldenStatus === "PASS" || result.goldenStatus === "FAIL",
+  );
+  if (scored.length === 0) return undefined;
+  return scored.every((result) => result.goldenStatus === "PASS") ? "PASS" : "FAIL";
+}
+
 export function alignCompareResults(
   resultsA: QueryRunResult[],
   resultsB: QueryRunResult[],
@@ -55,6 +65,8 @@ export function alignCompareResults(
     .map((queryKey) => {
       const a = mapA.get(queryKey);
       const b = mapB.get(queryKey);
+      const passA = passCaretK(resultsA, queryKey);
+      const passB = passCaretK(resultsB, queryKey);
       return {
         queryKey,
         groupName: a?.groupName ?? b?.groupName ?? "",
@@ -63,6 +75,7 @@ export function alignCompareResults(
         b,
         statusMatch: a !== undefined && b !== undefined && a.status === b.status,
         answerMatch: answersMatch(a, b),
+        passKMatch: passA !== undefined && passB !== undefined ? passA === passB : undefined,
       };
     });
 }
