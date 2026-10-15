@@ -14,7 +14,7 @@ export function parseQueries(text: string): string[] {
   const seen = new Set<string>();
   const result: string[] = [];
 
-  for (const part of text.split(/[\n,]+/)) {
+  for (const part of text.split(/\n+/)) {
     const trimmed = part.trim();
     if (!trimmed || seen.has(trimmed)) continue;
     seen.add(trimmed);

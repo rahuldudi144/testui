@@ -13,6 +13,8 @@ export interface WorkflowTestJsonFile {
   dryRun?: boolean;
   delayMs?: number;
   databaseConnectionId?: string;
+  /** When set, import fails if the parsed query count differs. */
+  queryCount?: number;
   /** Optional metadata — accepted and ignored on import. */
   description?: string;
   groups: Array<{
@@ -174,6 +176,18 @@ export function parseWorkflowTestJson(
 
     const queriesText = queriesToText(groupRecord.queries) ?? "";
     // Empty queries[] is allowed (suite scaffolding).
+    if (Array.isArray(groupRecord.queries)) {
+      const configured = groupRecord.queries.filter((entry) =>
+        Boolean(normalizeQueryEntry(entry)),
+      ).length;
+      const planned = queriesText ? parseQueries(queriesText).length : 0;
+      if (configured !== planned) {
+        return {
+          ok: false,
+          error: `groups[${i}] planned ${planned} queries but ${configured} were configured.`,
+        };
+      }
+    }
 
     if (
       groupRecord.categoryType !== undefined &&
@@ -218,6 +232,22 @@ export function parseWorkflowTestJson(
       return { ok: false, error: '"databaseConnectionId" must be a string when provided.' };
     }
     databaseConnectionId = record.databaseConnectionId.trim() || undefined;
+  }
+
+  if (record.queryCount !== undefined) {
+    if (typeof record.queryCount !== "number" || !Number.isFinite(record.queryCount)) {
+      return { ok: false, error: '"queryCount" must be a number when provided.' };
+    }
+    const planned = groups.reduce(
+      (total, group) => total + parseQueries(group.queriesText).length,
+      0,
+    );
+    if (planned !== record.queryCount) {
+      return {
+        ok: false,
+        error: `Planned query count ${planned} does not match configured count ${record.queryCount}.`,
+      };
+    }
   }
 
   // `description` and other optional root metadata are accepted and ignored.

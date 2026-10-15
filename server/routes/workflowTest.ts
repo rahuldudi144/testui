@@ -5,12 +5,14 @@ import { prisma } from "../db.js";
 import { loadEnv } from "../env.js";
 import {
   flattenGroupRecords,
+  configuredEntryCount,
   normalizeGroups,
   type WorkflowTestGroupRecord,
 } from "../parseStressQueries.js";
 import {
   analyzeStressRunResult,
   buildStressTestSummary,
+  isInfraErrorMessage,
   type PlannedQueryItem,
   type QueryRunResult,
 } from "../stressTestAnalyze.js";
@@ -327,6 +329,7 @@ async function runWorkflowQueryItems(
 
   let historyMessages: Message[] = [];
   let currentGroupId: string | null = null;
+  let consecutiveInfraErrors = 0;
   const completedDurations: number[] = [];
 
   for (let index = 0; index < items.length; index += 1) {
@@ -423,49 +426,88 @@ async function runWorkflowQueryItems(
       timeoutSignal,
     );
 
-    let runResult: QueryRunResult;
-    try {
-      const executed = await executeQueryItem(
-        {
-          groupName,
-          query,
-          categoryType,
-          expectedOutcome: policy.expectedOutcome,
-          messages: messagesForInvoke,
-          history: policy.history,
-          stopOnFailure: policy.stopOnFailure,
-          timeoutMs: policy.timeoutMs,
-        },
-        { ...queryContext, dryRun: itemDryRun, abortSignal: itemAbortSignal },
-      );
-      runResult = executed.result;
-    } catch (err) {
-      if (isAbortError(err) && queryContext.abortSignal.aborted) {
-        throw err;
-      }
-      if (isAbortError(err)) {
-        runResult = enrichQueryRunResult(
-          analyzeStressRunResult({
-            query,
+    let runResult: QueryRunResult | undefined;
+    for (let attempt = 0; attempt <= 2; attempt += 1) {
+      try {
+        const executed = await executeQueryItem(
+          {
             groupName,
-            durationMs: policy.timeoutMs ?? 0,
-            dryRun: itemDryRun,
-            errorMessage: `Query timed out after ${policy.timeoutMs ?? "?"}ms`,
+            query,
             categoryType,
             expectedOutcome: policy.expectedOutcome,
+            messages: messagesForInvoke,
             history: policy.history,
             stopOnFailure: policy.stopOnFailure,
             timeoutMs: policy.timeoutMs,
-          }),
-          EMPTY_METRICS,
-          new Date(),
+          },
+          { ...queryContext, dryRun: itemDryRun, abortSignal: itemAbortSignal },
         );
-      } else {
-        throw err;
+        runResult = executed.result;
+      } catch (err) {
+        if (isAbortError(err) && queryContext.abortSignal.aborted) {
+          throw err;
+        }
+        if (isAbortError(err)) {
+          runResult = enrichQueryRunResult(
+            analyzeStressRunResult({
+              query,
+              groupName,
+              durationMs: policy.timeoutMs ?? 0,
+              dryRun: itemDryRun,
+              errorMessage: `Query timed out after ${policy.timeoutMs ?? "?"}ms`,
+              categoryType,
+              expectedOutcome: policy.expectedOutcome,
+              history: policy.history,
+              stopOnFailure: policy.stopOnFailure,
+              timeoutMs: policy.timeoutMs,
+            }),
+            EMPTY_METRICS,
+            new Date(),
+          );
+        } else {
+          throw err;
+        }
       }
+
+      const infra =
+        runResult.actualOutcome === "infra_error" ||
+        isInfraErrorMessage(runResult.errorMessage);
+      if (!infra || attempt === 2) break;
+    }
+    if (!runResult) {
+      throw new Error("Query did not produce a result.");
     }
 
     completedDurations.push(runResult.durationMs);
+
+    const infraFailure =
+      runResult.actualOutcome === "infra_error" ||
+      isInfraErrorMessage(runResult.errorMessage);
+    consecutiveInfraErrors = infraFailure ? consecutiveInfraErrors + 1 : 0;
+    if (consecutiveInfraErrors >= 5) {
+      checkpoint.results.push(runResult);
+      await checkpointWorkflowRun(checkpoint, "partial", {
+        dryRun: queryContext.dryRun,
+        delayMs: queryContext.delayMs,
+      });
+      await safeWriteSSE(stream, runId, {
+        event: "error",
+        data: JSON.stringify({
+          message: "Stopped after 5 consecutive infrastructure errors.",
+        }),
+      });
+      await emitWorkflowRunComplete(stream, runId, {
+        ...reportFields,
+        summary: buildWorkflowRunSummary(
+          checkpoint.results,
+          checkpoint.plannedItems.length,
+          "partial",
+          checkpoint.plannedItems,
+        ),
+        results: checkpoint.results,
+      });
+      return "partial";
+    }
 
     const fatalError =
       runResult.status === "error" && runResult.errorMessage
@@ -1920,6 +1962,7 @@ workflowTestRoutes.post("/run", async (c) => {
       categoryType?: string;
       execution?: unknown;
     }>;
+    queryCount?: number;
     groupIds?: string[];
   }>();
 
@@ -1930,6 +1973,27 @@ workflowTestRoutes.post("/run", async (c) => {
 
   const allManualGroups = normalizeGroups(body.groups ?? [], { keepEmpty: true });
   const runnableManualGroups = normalizeGroups(body.groups ?? []);
+  const plannedCount = runnableManualGroups.reduce(
+    (total, group) => total + group.queries.length,
+    0,
+  );
+  const configuredCount = (body.groups ?? []).reduce((total, group) => {
+    if (!group.name?.trim()) return total;
+    return total + configuredEntryCount(group.queries);
+  }, 0);
+  if (
+    configuredCount !== plannedCount ||
+    (typeof body.queryCount === "number" && body.queryCount !== plannedCount)
+  ) {
+    const configured =
+      typeof body.queryCount === "number" ? body.queryCount : configuredCount;
+    return c.json(
+      {
+        error: `Planned query count ${plannedCount} does not match configured count ${configured}.`,
+      },
+      400,
+    );
+  }
   const groupIds = body.groupIds?.filter(Boolean);
 
   if (!groupIds?.length && runnableManualGroups.length === 0) {

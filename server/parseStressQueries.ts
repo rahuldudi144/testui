@@ -36,7 +36,7 @@ export function parseQueries(text: string): string[] {
   const seen = new Set<string>();
   const result: string[] = [];
 
-  for (const part of text.split(/[\n,]+/)) {
+  for (const part of text.split(/\n+/)) {
     const trimmed = part.trim();
     if (!trimmed || seen.has(trimmed)) continue;
     seen.add(trimmed);
@@ -44,6 +44,32 @@ export function parseQueries(text: string): string[] {
   }
 
   return result;
+}
+
+/** Count configured entries without splitting commas inside a query. */
+export function configuredEntryCount(queries: unknown): number {
+  if (Array.isArray(queries)) {
+    let count = 0;
+    for (const entry of queries) {
+      if (normalizeQueryEntry(entry)) count += 1;
+    }
+    return count;
+  }
+  if (typeof queries === "string") {
+    return parseQueries(queries).length;
+  }
+  return 0;
+}
+
+export function assertPlannedMatchesConfigured(
+  configured: number,
+  planned: number,
+): void {
+  if (configured !== planned) {
+    throw new Error(
+      `Planned query count ${planned} does not match configured count ${configured}.`,
+    );
+  }
 }
 
 /** Normalize a query entry: plain string or `{ query: string }`. */

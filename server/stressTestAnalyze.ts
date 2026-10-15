@@ -9,6 +9,14 @@ import {
 
 export type StressRunStatus = "pass" | "fail" | "error" | "planner_skip";
 
+/** Connection and timeout failures are infrastructure, not answer quality. */
+export function isInfraErrorMessage(message: string | undefined): boolean {
+  if (!message) return false;
+  return /timed out|timeout|econnrefused|econnreset|enotfound|connection|fetch failed|socket hang up|network/i.test(
+    message,
+  );
+}
+
 export type FailurePhase =
   | "query_build"
   | "execution"
@@ -81,6 +89,8 @@ export interface StressTestSummary {
   passed: number;
   failed: number;
   errors: number;
+  /** Timeouts and connection failures. Excluded from pass/fail accuracy. */
+  infraErrors?: number;
   plannerSkipped: number;
   byPhase: Partial<Record<FailurePhase, number>>;
   byGroup: Record<
@@ -542,6 +552,7 @@ export function analyzeStressRunResult(params: {
     const failedNode = findFailedNode(graphNodes, metricsTimeline);
     const failurePhase = failurePhaseForNode(failedNode);
 
+    const infra = isInfraErrorMessage(errorMessage);
     return applyExpectedPolicy(
       attachFailureDetails(
         {
@@ -549,6 +560,7 @@ export function analyzeStressRunResult(params: {
           status: "error",
           failurePhase,
           errorMessage,
+          actualOutcome: infra ? "infra_error" : base.actualOutcome,
           workflowPath: path.length > 0 ? path : undefined,
           workflowStatus: workflow.status,
         },
@@ -680,6 +692,7 @@ export function buildStressTestSummary(
     passed: 0,
     failed: 0,
     errors: 0,
+    infraErrors: 0,
     plannerSkipped: 0,
     byPhase: {},
     byGroup: {},
@@ -705,7 +718,10 @@ export function buildStressTestSummary(
 
     groupStats.total += 1;
 
-    if (result.status === "pass") {
+    const infra = result.actualOutcome === "infra_error";
+    if (infra) {
+      summary.infraErrors = (summary.infraErrors ?? 0) + 1;
+    } else if (result.status === "pass") {
       summary.passed += 1;
       groupStats.passed += 1;
     } else if (result.status === "error") {
@@ -735,13 +751,15 @@ export function buildStressTestSummary(
       plannerSkipped: 0,
     };
     categoryStats.total += 1;
-    if (result.status === "pass") categoryStats.passed += 1;
-    else if (result.status === "error") categoryStats.errors += 1;
-    else if (result.status === "planner_skip") categoryStats.plannerSkipped += 1;
-    else categoryStats.failed += 1;
+    if (!infra) {
+      if (result.status === "pass") categoryStats.passed += 1;
+      else if (result.status === "error") categoryStats.errors += 1;
+      else if (result.status === "planner_skip") categoryStats.plannerSkipped += 1;
+      else categoryStats.failed += 1;
+    }
     summary.byCategory![categoryKey] = categoryStats;
 
-    if (result.status !== "error" && result.expectedOutcome) {
+    if (!infra && result.status !== "error" && result.expectedOutcome) {
       const scored = scoreAgainstExpected({
         expectedOutcome: result.expectedOutcome as WorkflowExpectedOutcome,
         actualOutcome: result.actualOutcome,

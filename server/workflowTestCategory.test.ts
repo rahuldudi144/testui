@@ -44,10 +44,8 @@ describe("resolveExecution", () => {
     );
   });
 
-  test("READ_ONLY expects VALIDATION_FAILURE", () => {
-    expect(resolveExecution("READ_ONLY").expectedOutcome).toBe(
-      "VALIDATION_FAILURE",
-    );
+  test("READ_ONLY expects WRITE_REFUSAL", () => {
+    expect(resolveExecution("READ_ONLY").expectedOutcome).toBe("WRITE_REFUSAL");
   });
 
   test("overrides merge on top of defaults", () => {
@@ -153,6 +151,30 @@ describe("scoreAgainstExpected", () => {
       scoreAgainstExpected({
         expectedResult: "planner_skip",
         actualOutcome: "planner_skip",
+      }),
+    ).toBe("pass");
+  });
+
+  test("WRITE_REFUSAL accepts planner_skip during migration", () => {
+    expect(
+      scoreAgainstExpected({
+        expectedOutcome: "WRITE_REFUSAL",
+        actualOutcome: "planner_skip",
+      }),
+    ).toBe("pass");
+    expect(
+      scoreAgainstExpected({
+        expectedOutcome: "WRITE_REFUSAL",
+        actualOutcome: "write_refusal",
+      }),
+    ).toBe("pass");
+  });
+
+  test("SCHEMA_NOT_FOUND accepts unsupported in this slice", () => {
+    expect(
+      scoreAgainstExpected({
+        expectedOutcome: "SCHEMA_NOT_FOUND",
+        actualOutcome: "unsupported",
       }),
     ).toBe("pass");
   });
