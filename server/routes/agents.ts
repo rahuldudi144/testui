@@ -7,11 +7,7 @@ import {
   toPublicAgent,
 } from "../userAgent.js";
 import { normalizeProviderInput } from "../llmProviders.js";
-import {
-  normalizeEmbeddingProviderInput,
-  validateAgentEmbeddingFields,
-  validateAgentLlmFields,
-} from "../validateAgentLlm.js";
+import { validateAgentLlmFields } from "../validateAgentLlm.js";
 
 type AuthUser = { id: string; username: string; createdAt: Date };
 
@@ -83,92 +79,6 @@ function resolveProviderFields(
   return { llmProvider, modelName, baseUrl };
 }
 
-function resolveEmbeddingFields(
-  body: AgentEmbeddingBody & { apiKey?: string | null },
-  existing?: {
-    embeddingProvider?: string | null;
-    embeddingModelName?: string | null;
-    embeddingApiKey?: string | null;
-    embeddingBaseUrl?: string | null;
-    embeddingDimension?: number | null;
-    apiKey?: string | null;
-  },
-): {
-  error?: string;
-  embeddingProvider: string | null;
-  embeddingModelName: string | null;
-  embeddingBaseUrl: string | null;
-  embeddingDimension: number | null;
-} {
-  const embeddingProvider =
-    body.embeddingProvider !== undefined
-      ? normalizeEmbeddingProviderInput(body.embeddingProvider)
-      : normalizeEmbeddingProviderInput(existing?.embeddingProvider);
-
-  if (
-    body.embeddingProvider !== undefined &&
-    body.embeddingProvider?.trim() &&
-    !embeddingProvider
-  ) {
-    return {
-      error:
-        "Unsupported embedding provider. Use openai, local, ollama, or gemini.",
-      embeddingProvider: null,
-      embeddingModelName: null,
-      embeddingBaseUrl: null,
-      embeddingDimension: null,
-    };
-  }
-
-  const embeddingModelName =
-    body.embeddingModelName !== undefined
-      ? trimToNull(body.embeddingModelName)
-      : existing?.embeddingModelName ?? null;
-  const embeddingBaseUrl =
-    body.embeddingBaseUrl !== undefined
-      ? trimToNull(body.embeddingBaseUrl)
-      : existing?.embeddingBaseUrl ?? null;
-
-  const dimensionInput =
-    body.embeddingDimension !== undefined
-      ? body.embeddingDimension
-      : existing?.embeddingDimension ?? null;
-
-  const validation = validateAgentEmbeddingFields({
-    embeddingProvider,
-    embeddingModelName,
-    embeddingApiKey: body.embeddingApiKey,
-    storedEmbeddingApiKey: existing?.embeddingApiKey,
-    embeddingBaseUrl,
-    embeddingDimension: dimensionInput,
-    chatApiKey: body.apiKey,
-    storedChatApiKey: existing?.apiKey,
-  });
-
-  if (validation.error) {
-    return {
-      error: validation.error,
-      embeddingProvider: validation.provider,
-      embeddingModelName,
-      embeddingBaseUrl,
-      embeddingDimension: null,
-    };
-  }
-
-  // Explicit null/empty in body clears stored dimension.
-  const embeddingDimension =
-    body.embeddingDimension !== undefined
-      ? (validation.embeddingDimension ?? null)
-      : existing?.embeddingDimension ?? null;
-
-  return {
-    embeddingProvider,
-    embeddingModelName,
-    embeddingBaseUrl,
-    embeddingDimension,
-  };
-}
-
 export const agentRoutes = new Hono<{ Variables: { user: AuthUser } }>();
 
 agentRoutes.use("*", authMiddleware);
@@ -210,11 +120,6 @@ agentRoutes.post("/", async (c) => {
     return c.json({ error: providerFields.error }, 400);
   }
 
-  const embeddingFields = resolveEmbeddingFields(body);
-  if (embeddingFields.error) {
-    return c.json({ error: embeddingFields.error }, 400);
-  }
-
   const existingCount = await prisma.agentProfile.count({
     where: { userId: user.id },
   });
@@ -228,11 +133,11 @@ agentRoutes.post("/", async (c) => {
       modelName: providerFields.modelName,
       apiKey: trimToNull(body.apiKey),
       baseUrl: providerFields.baseUrl,
-      embeddingProvider: embeddingFields.embeddingProvider,
-      embeddingModelName: embeddingFields.embeddingModelName,
-      embeddingApiKey: trimToNull(body.embeddingApiKey),
-      embeddingBaseUrl: embeddingFields.embeddingBaseUrl,
-      embeddingDimension: embeddingFields.embeddingDimension,
+      embeddingProvider: null,
+      embeddingModelName: null,
+      embeddingApiKey: null,
+      embeddingBaseUrl: null,
+      embeddingDimension: null,
     },
   });
 
@@ -270,18 +175,8 @@ agentRoutes.patch("/:id", async (c) => {
     return c.json({ error: providerFields.error }, 400);
   }
 
-  const embeddingFields = resolveEmbeddingFields(body, existing);
-  if (embeddingFields.error) {
-    return c.json({ error: embeddingFields.error }, 400);
-  }
-
   const trimmedApiKey = body.apiKey?.trim();
   const apiKey = trimmedApiKey ? trimmedApiKey : existing.apiKey;
-
-  const trimmedEmbeddingApiKey = body.embeddingApiKey?.trim();
-  const embeddingApiKey = trimmedEmbeddingApiKey
-    ? trimmedEmbeddingApiKey
-    : existing.embeddingApiKey;
 
   const agent = await prisma.agentProfile.update({
     where: { id },
@@ -292,11 +187,11 @@ agentRoutes.patch("/:id", async (c) => {
       modelName: providerFields.modelName,
       baseUrl: providerFields.baseUrl,
       apiKey,
-      embeddingProvider: embeddingFields.embeddingProvider,
-      embeddingModelName: embeddingFields.embeddingModelName,
-      embeddingBaseUrl: embeddingFields.embeddingBaseUrl,
-      embeddingApiKey,
-      embeddingDimension: embeddingFields.embeddingDimension,
+      embeddingProvider: null,
+      embeddingModelName: null,
+      embeddingBaseUrl: null,
+      embeddingApiKey: null,
+      embeddingDimension: null,
     },
   });
 

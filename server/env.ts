@@ -24,8 +24,6 @@ const LLM_PROVIDERS = [
   "gemini",
 ] as const satisfies readonly LlmProvider[];
 
-const EMBEDDING_PROVIDERS = ["openai", "local", "ollama", "gemini"] as const;
-
 const envSchema = z
   .object({
     TESTUI_DATABASE_URL: z.string().min(1),
@@ -41,28 +39,20 @@ const envSchema = z
       .transform((value) => canonicalizeLlmProvider(value) as LlmProvider),
     /** Preferred API key for any provider that requires one. */
     DB_AGENT_API_KEY: z.string().optional(),
-    /** Backward-compatible alias for DB_AGENT_API_KEY (OpenAI-era name). */
+    /** Same key the main app reads. */
+    OPENAI_API_KEY: z.string().optional(),
+    /** Backward-compatible alias for the OpenAI chat key. */
     DB_AGENT_OPENAI_API_KEY: z.string().optional(),
-    DB_AGENT_MODEL_NAME: z.string().default("gpt-4o-mini"),
-    /** Embedding backend: openai | local | ollama | gemini (independent of chat). */
-    DB_AGENT_EMBEDDING_PROVIDER: z
-      .enum(EMBEDDING_PROVIDERS)
-      .default("openai"),
-    /** Embedding model for knowledge indexing / semantic search. */
-    DB_AGENT_EMBEDDING_MODEL: z.string().optional(),
-    /** Optional dedicated embedding API key (falls back to chat key for openai/gemini). */
-    DB_AGENT_EMBEDDING_API_KEY: z.string().optional(),
-    /** Required when DB_AGENT_EMBEDDING_PROVIDER=local (OpenAI-compatible host). */
-    DB_AGENT_EMBEDDING_BASE_URL: z.string().optional(),
-    /** Optional pgvector / embedding size override (else derived from model). */
-    DB_AGENT_EMBEDDING_DIMENSION: z.coerce.number().int().positive().optional(),
+    DB_AGENT_MODEL_NAME: z.string().default("gpt-5.1"),
     /** Custom base URL for OpenAI-compatible / Anthropic / Gemini adapters. */
     DB_AGENT_BASE_URL: z.string().optional(),
     DB_AGENT_OLLAMA_BASE_URL: z.string().optional(),
     DB_AGENT_DB_TYPE: z.enum(["postgres", "mysql"]).optional(),
     DB_AGENT_DB_URI: z.string().optional(),
-    /** Shared pgvector knowledge DB; overridden by per-connection knowledgeDbUri when set. */
-    KNOWLEDGE_DB_URI: z.string().optional(),
+    ASK_CHAT_HISTORY_MESSAGE_LIMIT: z.preprocess(
+      (value) => (value === undefined || value === "" ? 15 : value),
+      z.coerce.number().int().min(0).max(100),
+    ),
     DB_AGENT_READ_ONLY: z
       .enum(["true", "false"])
       .default("true")
@@ -72,7 +62,9 @@ const envSchema = z
   })
   .superRefine((data, ctx) => {
     const apiKey =
-      data.DB_AGENT_API_KEY?.trim() || data.DB_AGENT_OPENAI_API_KEY?.trim();
+      data.DB_AGENT_API_KEY?.trim() ||
+      data.OPENAI_API_KEY?.trim() ||
+      data.DB_AGENT_OPENAI_API_KEY?.trim();
 
     if (requiresApiKey(data.DB_AGENT_LLM_PROVIDER) && !apiKey) {
       ctx.addIssue({
@@ -93,29 +85,6 @@ const envSchema = z
       });
     }
 
-    if (
-      data.DB_AGENT_EMBEDDING_PROVIDER === "local" &&
-      !data.DB_AGENT_EMBEDDING_BASE_URL?.trim()
-    ) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message:
-          "DB_AGENT_EMBEDDING_BASE_URL is required when DB_AGENT_EMBEDDING_PROVIDER is local",
-        path: ["DB_AGENT_EMBEDDING_BASE_URL"],
-      });
-    }
-
-    if (
-      (data.DB_AGENT_EMBEDDING_PROVIDER === "local" ||
-        data.DB_AGENT_EMBEDDING_PROVIDER === "ollama") &&
-      !data.DB_AGENT_EMBEDDING_MODEL?.trim()
-    ) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: `DB_AGENT_EMBEDDING_MODEL is required when DB_AGENT_EMBEDDING_PROVIDER is ${data.DB_AGENT_EMBEDDING_PROVIDER}`,
-        path: ["DB_AGENT_EMBEDDING_MODEL"],
-      });
-    }
   });
 
 export type Env = z.infer<typeof envSchema>;
@@ -140,9 +109,12 @@ export function loadEnv(): Env {
   return cached;
 }
 
-/** Resolved API key from env (DB_AGENT_API_KEY, then legacy DB_AGENT_OPENAI_API_KEY). */
+/** Chat API key: test UI key, then the same names the main app reads. */
 export function resolveEnvApiKey(env: Env = loadEnv()): string | undefined {
-  const key = env.DB_AGENT_API_KEY?.trim() || env.DB_AGENT_OPENAI_API_KEY?.trim();
+  const key =
+    env.DB_AGENT_API_KEY?.trim() ||
+    env.OPENAI_API_KEY?.trim() ||
+    env.DB_AGENT_OPENAI_API_KEY?.trim();
   return key || undefined;
 }
 

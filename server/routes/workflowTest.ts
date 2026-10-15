@@ -16,10 +16,7 @@ import {
   type PlannedQueryItem,
   type QueryRunResult,
 } from "../stressTestAnalyze.js";
-import {
-  parseDbHost,
-  resolveDatabaseForWorkflowTest,
-} from "../userDatabase.js";
+import { envQuerySetup } from "../queryTarget.js";
 import {
   expectedOutcomeToAgentOutcome,
   resolveExecution,
@@ -40,8 +37,7 @@ import {
   toWorkflowTestSummary,
   upsertWorkflowTest,
 } from "../workflowTestDuplicate.js";
-import { resolveWorkflowTestAgent } from "../workflowTestAgent.js";
-import type { profileAgentConfig } from "../userAgent.js";
+import type { AgentConfigOverrides } from "../agent.js";
 import {
   ensureFailuresGroup,
   importFailuresFromRun,
@@ -207,9 +203,7 @@ interface RunWorkflowTestOptions {
 interface QueryLoopContext {
   userId: string;
   dbType: "postgres" | "mysql";
-  activeDb: NonNullable<
-    Awaited<ReturnType<typeof resolveDatabaseForWorkflowTest>>
-  >;
+  activeDb: ReturnType<typeof envQuerySetup>["activeDb"];
   dbInfo: { dbType: string; name: string; host: string };
   agentConfig: {
     provider: string;
@@ -217,7 +211,7 @@ interface QueryLoopContext {
     readOnly: boolean;
     maxValidationRetries: number;
   };
-  runnerOptions: ReturnType<typeof profileAgentConfig>;
+  runnerOptions: AgentConfigOverrides;
   dryRun: boolean;
   delayMs: number;
   avgQueryMs: number;
@@ -539,7 +533,8 @@ async function runWorkflowQueryItems(
     }
 
     if (policy.history === "KEEP") {
-      historyMessages = [
+      const limit = loadEnv().ASK_CHAT_HISTORY_MESSAGE_LIMIT;
+      const nextHistory: Message[] = [
         ...historyMessages,
         { role: "user", content: query },
         {
@@ -547,6 +542,7 @@ async function runWorkflowQueryItems(
           content: runResult.markdownResponse ?? runResult.markdownPreview ?? "",
         },
       ];
+      historyMessages = nextHistory.slice(limit > 0 ? -limit : 0);
     }
 
     if (abort.isAborted()) {
@@ -653,12 +649,9 @@ async function executeWorkflowTestRun(
     select: { databaseConnectionId: true, suiteKey: true },
   });
 
-  let activeDb: Awaited<ReturnType<typeof resolveDatabaseForWorkflowTest>>;
+  let setup: ReturnType<typeof envQuerySetup>;
   try {
-    activeDb = await resolveDatabaseForWorkflowTest(userId, {
-      databaseConnectionId,
-      testDatabaseConnectionId: testRow?.databaseConnectionId,
-    });
+    setup = envQuerySetup();
   } catch (error) {
     await stream.writeSSE({
       event: "error",
@@ -666,32 +659,7 @@ async function executeWorkflowTestRun(
     });
     return;
   }
-
-  if (!activeDb) {
-    await stream.writeSSE({
-      event: "error",
-      data: JSON.stringify({
-        message:
-          "No database configured. Add a PostgreSQL or MySQL connection in Settings.",
-      }),
-    });
-    return;
-  }
-
-  const resolvedAgent = await resolveWorkflowTestAgent(userId, agentProfileId);
-  if (!resolvedAgent) {
-    await stream.writeSSE({
-      event: "error",
-      data: JSON.stringify({
-        message: agentProfileId
-          ? "Selected agent profile was not found."
-          : "Select an agent for this test before running.",
-      }),
-    });
-    return;
-  }
-
-  const runnerOptions = resolvedAgent.runnerOptions;
+  const { activeDb, dbType, dbInfo, agentConfig, runnerOptions, snapshot } = setup;
 
   const items = flattenGroupRecords(groups, groupIds);
   if (items.length === 0) {
@@ -703,21 +671,6 @@ async function executeWorkflowTestRun(
     });
     return;
   }
-
-  const dbType = activeDb.dbType as "postgres" | "mysql";
-  const dbInfo = {
-    dbType: activeDb.dbType,
-    name: activeDb.name,
-    host: parseDbHost(activeDb.dbUri),
-  };
-
-  const env = loadEnv();
-  const agentConfig = {
-    provider: runnerOptions.llmProvider ?? env.DB_AGENT_LLM_PROVIDER,
-    model: runnerOptions.modelName ?? env.DB_AGENT_MODEL_NAME,
-    readOnly: env.DB_AGENT_READ_ONLY,
-    maxValidationRetries: env.DB_AGENT_MAX_VALIDATION_RETRIES,
-  };
 
   const avgQueryMs = await loadAvgQueryMsForTest(userId, testId, testRow?.suiteKey);
   const plannedItems: PlannedQueryItem[] = items.map(({ groupName, query }) => ({
@@ -736,8 +689,8 @@ async function executeWorkflowTestRun(
     data: {
       userId,
       workflowTestId: testId,
-      agentProfileId: resolvedAgent.snapshot.id,
-      agent: resolvedAgent.snapshot as unknown as Prisma.InputJsonValue,
+      agentProfileId: null,
+      agent: snapshot as unknown as Prisma.InputJsonValue,
       testName,
       dryRun,
       delayMs,
@@ -785,7 +738,7 @@ async function executeWorkflowTestRun(
     delayMs,
     database: dbInfo,
     ranAt: ranAt.toISOString(),
-    agent: resolvedAgent.snapshot,
+    agent: snapshot,
   };
 
   try {
@@ -875,11 +828,9 @@ async function executeResumeWorkflowTestRun(
     return;
   }
 
-  let activeDb: Awaited<ReturnType<typeof resolveDatabaseForWorkflowTest>>;
+  let setup: ReturnType<typeof envQuerySetup>;
   try {
-    activeDb = await resolveDatabaseForWorkflowTest(userId, {
-      testDatabaseConnectionId: existingRun.workflowTest.databaseConnectionId,
-    });
+    setup = envQuerySetup();
   } catch (error) {
     await stream.writeSSE({
       event: "error",
@@ -887,49 +838,9 @@ async function executeResumeWorkflowTestRun(
     });
     return;
   }
-
-  if (!activeDb) {
-    await stream.writeSSE({
-      event: "error",
-      data: JSON.stringify({
-        message:
-          "No database configured. Add a PostgreSQL or MySQL connection in Settings.",
-      }),
-    });
-    return;
-  }
-
-  const resolvedAgent = await resolveWorkflowTestAgent(
-    userId,
-    existingRun.agentProfileId ?? existingRun.workflowTest.agentProfileId,
-  );
-  if (!resolvedAgent) {
-    await stream.writeSSE({
-      event: "error",
-      data: JSON.stringify({
-        message: "No agent profile configured for this test run.",
-      }),
-    });
-    return;
-  }
-
-  const runnerOptions = resolvedAgent.runnerOptions;
+  const { activeDb, dbType, dbInfo, agentConfig, runnerOptions, snapshot } = setup;
   const dryRun = options?.dryRun ?? existingRun.dryRun;
   const delayMs = Math.max(0, options?.delayMs ?? existingRun.delayMs);
-  const dbType = activeDb.dbType as "postgres" | "mysql";
-  const dbInfo = {
-    dbType: activeDb.dbType,
-    name: activeDb.name,
-    host: parseDbHost(activeDb.dbUri),
-  };
-
-  const env = loadEnv();
-  const agentConfig = {
-    provider: runnerOptions.llmProvider ?? env.DB_AGENT_LLM_PROVIDER,
-    model: runnerOptions.modelName ?? env.DB_AGENT_MODEL_NAME,
-    readOnly: env.DB_AGENT_READ_ONLY,
-    maxValidationRetries: env.DB_AGENT_MAX_VALIDATION_RETRIES,
-  };
 
   const avgQueryMs = await loadAvgQueryMsForTest(
     userId,
@@ -975,8 +886,7 @@ async function executeResumeWorkflowTestRun(
     database: dbInfo,
     ranAt: existingRun.ranAt.toISOString(),
     agent:
-      (existingRun.agent as WorkflowTestReportPayload["agent"]) ??
-      resolvedAgent.snapshot,
+      (existingRun.agent as WorkflowTestReportPayload["agent"]) ?? snapshot,
   };
 
   try {
@@ -1070,11 +980,9 @@ async function executeRerunFailuresInRun(
     return;
   }
 
-  let activeDb: Awaited<ReturnType<typeof resolveDatabaseForWorkflowTest>>;
+  let setup: ReturnType<typeof envQuerySetup>;
   try {
-    activeDb = await resolveDatabaseForWorkflowTest(userId, {
-      testDatabaseConnectionId: existingRun.workflowTest.databaseConnectionId,
-    });
+    setup = envQuerySetup();
   } catch (error) {
     await stream.writeSSE({
       event: "error",
@@ -1082,51 +990,10 @@ async function executeRerunFailuresInRun(
     });
     return;
   }
-
-  if (!activeDb) {
-    await stream.writeSSE({
-      event: "error",
-      data: JSON.stringify({
-        message:
-          "No database configured. Add a PostgreSQL or MySQL connection in Settings.",
-      }),
-    });
-    return;
-  }
-
-  const requestedAgentId = options?.agentProfileId?.trim() || null;
-  const resolvedAgent = await resolveWorkflowTestAgent(
-    userId,
-    requestedAgentId ??
-      existingRun.agentProfileId ??
-      existingRun.workflowTest.agentProfileId,
-  );
-  if (!resolvedAgent) {
-    await stream.writeSSE({
-      event: "error",
-      data: JSON.stringify({
-        message: requestedAgentId
-          ? "Selected agent profile was not found."
-          : "No agent profile configured for this test run.",
-      }),
-    });
-    return;
-  }
-
-  const runnerOptions = resolvedAgent.runnerOptions;
+  const { activeDb, dbType, dbInfo, agentConfig, runnerOptions, snapshot } = setup;
 
   const dryRun = options?.dryRun ?? existingRun.dryRun;
   const delayMs = Math.max(0, options?.delayMs ?? existingRun.delayMs);
-
-  const dbType = activeDb.dbType as "postgres" | "mysql";
-
-  const env = loadEnv();
-  const agentConfig = {
-    provider: runnerOptions.llmProvider ?? env.DB_AGENT_LLM_PROVIDER,
-    model: runnerOptions.modelName ?? env.DB_AGENT_MODEL_NAME,
-    readOnly: env.DB_AGENT_READ_ONLY,
-    maxValidationRetries: env.DB_AGENT_MAX_VALIDATION_RETRIES,
-  };
 
   const avgQueryMs = await loadAvgQueryMsForTest(
     userId,
@@ -1140,11 +1007,6 @@ async function executeRerunFailuresInRun(
   const runStream = wrapStreamForRun(runId, stream);
   const emitActivity = createActivityEmitter(stream, runId);
 
-  const dbInfo = {
-    dbType: activeDb.dbType,
-    name: activeDb.name,
-    host: parseDbHost(activeDb.dbUri),
-  };
   const queryContext = {
     userId,
     dbType,
@@ -1175,8 +1037,8 @@ async function executeRerunFailuresInRun(
   await prisma.workflowTestRun.update({
     where: { id: runId },
     data: {
-      agentProfileId: resolvedAgent.agent.id,
-      agent: resolvedAgent.snapshot as unknown as Prisma.InputJsonValue,
+      agentProfileId: null,
+      agent: snapshot as unknown as Prisma.InputJsonValue,
       summary: buildWorkflowRunSummary(
         existingResults,
         plannedCount,
@@ -1282,7 +1144,7 @@ async function executeRerunFailuresInRun(
       delayMs,
       database: dbInfo,
       ranAt: existingRun.ranAt.toISOString(),
-      agent: resolvedAgent.snapshot,
+      agent: snapshot,
       summary,
       results: workingResults,
     });
@@ -2012,17 +1874,6 @@ workflowTestRoutes.post("/run", async (c) => {
     dryRun,
     delayMs,
   });
-
-  const resolvedAgentForRun = await resolveWorkflowTestAgent(
-    user.id,
-    agentProfileId ?? savedTest.agentProfileId,
-  );
-  if (!resolvedAgentForRun) {
-    return c.json(
-      { error: "Select an agent for this test before running." },
-      400,
-    );
-  }
 
   if (allManualGroups.length > 0) {
     await saveManualGroups(savedTest.id, allManualGroups);

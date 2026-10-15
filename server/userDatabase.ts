@@ -1,6 +1,5 @@
 import type { DatabaseMetadata, DatabaseType } from "../../types/index.js";
 import { prisma } from "./db.js";
-import { loadEnv } from "./env.js";
 import { ensureConnectionSchema } from "./schemaCache.js";
 
 export type SchemaSyncStatus = "idle" | "syncing" | "ready" | "failed";
@@ -24,7 +23,6 @@ export interface UserDatabase {
   dbUri: string;
   host: string;
   knowledgeDbUri: string | null;
-  /** True when env KNOWLEDGE_DB_URI can fill in for a missing per-connection URI. */
   hasEnvKnowledgeDbUri: boolean;
   businessContext: string | null;
   schemaSyncStatus: SchemaSyncStatus;
@@ -52,12 +50,7 @@ export function resolveKnowledgeDbUri(connection: {
   const fromConnection = connection.knowledgeDbUri?.trim();
   if (fromConnection) return fromConnection;
 
-  const fromEnv = loadEnv().KNOWLEDGE_DB_URI?.trim();
-  if (fromEnv) return fromEnv;
-
-  throw new Error(
-    "Knowledge database URI is not configured. Set KNOWLEDGE_DB_URI or add a knowledge DB URI on this connection.",
-  );
+  throw new Error("Knowledge indexing is not configured.");
 }
 
 /** Knowledge URI for indexing only (Build knowledge). Chat does not use this. */
@@ -122,7 +115,7 @@ export function toPublicDatabase(row: {
     dbUri: row.dbUri,
     host: parseDbHost(row.dbUri),
     knowledgeDbUri,
-    hasEnvKnowledgeDbUri: Boolean(loadEnv().KNOWLEDGE_DB_URI?.trim()),
+    hasEnvKnowledgeDbUri: false,
     businessContext,
     schemaSyncStatus: (row.schemaSyncStatus ?? "idle") as SchemaSyncStatus,
     schemaSyncedAt: row.schemaSyncedAt?.toISOString() ?? null,

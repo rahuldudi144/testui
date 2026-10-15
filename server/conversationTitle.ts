@@ -1,7 +1,5 @@
 import { randomUUID } from "crypto";
-import { DatabaseAgent } from "../../index.js";
-import type { DatabaseType } from "../../types/index.js";
-import { buildConfig, type AgentConfigOverrides } from "./agent.js";
+import { createQueryAgent } from "./queryTarget.js";
 
 const DEFAULT_TITLES = new Set(["New conversation", "Untitled"]);
 
@@ -19,11 +17,9 @@ export function isDefaultConversationTitle(title: string | null | undefined): bo
 export async function generateConversationTitle(
   query: string,
   conversationId: string,
-  dbType: DatabaseType,
-  runnerOptions?: AgentConfigOverrides,
 ): Promise<string> {
   try {
-    const agent = new DatabaseAgent(buildConfig(dbType, runnerOptions));
+    const agent = createQueryAgent();
     const title = await agent.generateTitle(query, {
       correlationId: conversationId,
       requestId: randomUUID(),

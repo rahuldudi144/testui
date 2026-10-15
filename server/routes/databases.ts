@@ -1,5 +1,4 @@
 import { Hono } from "hono";
-import { streamSSE } from "hono/streaming";
 import { Prisma } from "@prisma/client";
 import { prisma } from "../db.js";
 import { authMiddleware } from "./auth.js";
@@ -11,10 +10,7 @@ import {
   validateDbType,
   resolveKnowledgeDbUri,
 } from "../userDatabase.js";
-import {
-  listConnectionKnowledgeDocuments,
-  streamKnowledgeIndexWithPreviewSafe,
-} from "../knowledgeIndexStream.js";
+import { listConnectionKnowledgeDocuments } from "../knowledgeIndexStream.js";
 import { testDatabaseConnection } from "../agent.js";
 import { errorMessage } from "../../../utils/errors.js";
 import {
@@ -264,68 +260,12 @@ databaseRoutes.patch("/:id", async (c) => {
   return c.json({ database: toPublicDatabase(connection) });
 });
 
-/** Stream knowledge indexing progress (SSE). */
-databaseRoutes.post("/:id/index-knowledge", async (c) => {
-  const user = c.get("user");
-  const id = c.req.param("id");
-
-  const existing = await prisma.databaseConnection.findFirst({
-    where: { id, userId: user.id },
-  });
-  if (!existing) {
-    return c.json({ error: "Database connection not found." }, 404);
-  }
-
-  try {
-    resolveKnowledgeDbUri(existing);
-  } catch (error) {
-    return c.json({ error: errorMessage(error) }, 400);
-  }
-
-  c.header("Cache-Control", "no-cache, no-transform");
-  c.header("Connection", "keep-alive");
-  c.header("X-Accel-Buffering", "no");
-
-  return streamSSE(c, async (stream) => {
-    await streamKnowledgeIndexWithPreviewSafe(
-      stream,
-      id,
-      user.id,
-      c.req.raw.signal,
-    );
-  });
+databaseRoutes.post("/:id/index-knowledge", (c) => {
+  return c.json({ error: "Knowledge indexing is not configured." }, 410);
 });
 
-/** Backward-compatible alias — redirects to the same indexing flow. */
-databaseRoutes.post("/:id/sync-schema", async (c) => {
-  const user = c.get("user");
-  const id = c.req.param("id");
-
-  const existing = await prisma.databaseConnection.findFirst({
-    where: { id, userId: user.id },
-  });
-  if (!existing) {
-    return c.json({ error: "Database connection not found." }, 404);
-  }
-
-  try {
-    resolveKnowledgeDbUri(existing);
-  } catch (error) {
-    return c.json({ error: errorMessage(error) }, 400);
-  }
-
-  c.header("Cache-Control", "no-cache, no-transform");
-  c.header("Connection", "keep-alive");
-  c.header("X-Accel-Buffering", "no");
-
-  return streamSSE(c, async (stream) => {
-    await streamKnowledgeIndexWithPreviewSafe(
-      stream,
-      id,
-      user.id,
-      c.req.raw.signal,
-    );
-  });
+databaseRoutes.post("/:id/sync-schema", (c) => {
+  return c.json({ error: "Knowledge indexing is not configured." }, 410);
 });
 
 databaseRoutes.post("/:id/activate", async (c) => {

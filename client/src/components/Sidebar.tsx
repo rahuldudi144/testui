@@ -6,7 +6,6 @@ import {
   MessageSquare,
   MessageSquarePlus,
   Search,
-  Settings,
   Trash2,
 } from "lucide-react";
 import { cn } from "../lib/cn";
@@ -32,7 +31,6 @@ interface Props {
   onNew: () => void;
   onDelete: (id: string) => void;
   onLogout: () => void;
-  onOpenSettings: () => void;
   onOpenWorkflowTest: () => void;
 }
 
@@ -55,7 +53,6 @@ export function Sidebar({
   onNew,
   onDelete,
   onLogout,
-  onOpenSettings,
   onOpenWorkflowTest,
 }: Props) {
   const [deleteTarget, setDeleteTarget] = useState<{
@@ -245,16 +242,6 @@ export function Sidebar({
             ) : (
               <FlaskConical className="h-4 w-4" />
             )}
-          </Button>
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon"
-            onClick={onOpenSettings}
-            aria-label="Settings"
-            title="Settings"
-          >
-            <Settings className="h-4 w-4" />
           </Button>
           <Button
             type="button"

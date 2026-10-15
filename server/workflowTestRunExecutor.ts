@@ -15,7 +15,6 @@ import {
   formatWorkflowAgentError,
   type QueryRunResult,
 } from "./stressTestAnalyze.js";
-import { connectionAgentInvokeInput } from "./userDatabase.js";
 import type { profileAgentConfig } from "./userAgent.js";
 import { enrichQueryRunResult } from "./workflowTestObservability.js";
 import { subscribeWorkflowActivity } from "./workflowTestActivity.js";
@@ -201,9 +200,7 @@ async function runQueryItem(
         requestId,
         correlationId,
         abortSignal,
-        ...(await connectionAgentInvokeInput(activeDb, userId)),
       },
-      runnerOptions,
     );
 
     const generatedSql =

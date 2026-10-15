@@ -1,7 +1,6 @@
 import { useMemo, useState } from "react";
 import { ChevronDown, ChevronRight, Plus, RotateCcw, Trash2 } from "lucide-react";
-import type { UserAgent, UserDatabase, WorkflowTestGroupRecord } from "../../api";
-import { providerLabel } from "../../lib/llmProviders";
+import type { WorkflowTestGroupRecord } from "../../api";
 import {
   countQueriesInGroups,
   parseQueries,
@@ -43,12 +42,6 @@ interface Props {
   onTestNameChange: (value: string) => void;
   groups: StressTestGroupInput[];
   onGroupsChange: (groups: StressTestGroupInput[]) => void;
-  agents: UserAgent[];
-  agentProfileId: string | null;
-  onAgentProfileIdChange: (value: string | null) => void;
-  databases: UserDatabase[];
-  databaseConnectionId: string | null;
-  onDatabaseConnectionIdChange: (value: string | null) => void;
   dryRun: boolean;
   onDryRunChange: (value: boolean) => void;
   delayMs: number;
@@ -79,12 +72,6 @@ export function WorkflowTestForm({
   onTestNameChange,
   groups,
   onGroupsChange,
-  agents,
-  agentProfileId,
-  onAgentProfileIdChange,
-  databases,
-  databaseConnectionId,
-  onDatabaseConnectionIdChange,
   dryRun,
   onDryRunChange,
   delayMs,
@@ -214,55 +201,6 @@ export function WorkflowTestForm({
           required
         />
       </FormField>
-
-      <div className="grid gap-4 sm:grid-cols-2">
-        <FormField>
-          <Label htmlFor="workflow-test-agent">Agent</Label>
-          <Select
-            id="workflow-test-agent"
-            value={agentProfileId ?? ""}
-            disabled={disabled}
-            onChange={(e) =>
-              onAgentProfileIdChange(e.target.value ? e.target.value : null)
-            }
-          >
-            <option value="" disabled>
-              Select an agent…
-            </option>
-            {agents.map((agent) => (
-              <option key={agent.id} value={agent.id}>
-                {agent.name} ({providerLabel(agent.llmProvider)}
-                {agent.modelName ? ` · ${agent.modelName}` : ""})
-              </option>
-            ))}
-          </Select>
-          <p className="mt-1 text-xs text-muted-foreground">
-            Required. This test always runs with the selected agent profile.
-          </p>
-        </FormField>
-
-        <FormField>
-          <Label htmlFor="workflow-test-database">Database</Label>
-          <Select
-            id="workflow-test-database"
-            value={databaseConnectionId ?? ""}
-            disabled={disabled}
-            onChange={(e) =>
-              onDatabaseConnectionIdChange(e.target.value ? e.target.value : null)
-            }
-          >
-            <option value="">Active database (default)</option>
-            {databases.map((db) => (
-              <option key={db.id} value={db.id}>
-                {db.name} ({db.dbType})
-              </option>
-            ))}
-          </Select>
-          <p className="mt-1 text-xs text-muted-foreground">
-            Optional. Pins this test to a specific connection instead of your active database.
-          </p>
-        </FormField>
-      </div>
 
       <div className="rounded-lg border border-border bg-card/40 p-4">
         <button

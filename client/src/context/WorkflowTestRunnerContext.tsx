@@ -390,10 +390,8 @@ function isNotFoundError(error: unknown): boolean {
 
 export function WorkflowTestRunnerProvider({
   children,
-  dbConfigured,
 }: {
   children: ReactNode;
-  dbConfigured: boolean;
 }) {
   const [running, setRunning] = useState(false);
   const [reconnecting, setReconnecting] = useState(false);
@@ -654,15 +652,6 @@ export function WorkflowTestRunnerProvider({
         setError("A workflow test is already running.");
         return;
       }
-      if (!dbConfigured) {
-        setError("Configure a database connection before running workflow tests.");
-        return;
-      }
-      if (!config.agentProfileId) {
-        setError("Select an agent for this test before running.");
-        return;
-      }
-
       setLastConfig(config);
       setTestName(config.testName);
       const { controller, generation } = beginRun();
@@ -695,7 +684,7 @@ export function WorkflowTestRunnerProvider({
         if (isActiveRun()) finishRun(controller);
       }
     },
-    [beginRun, dbConfigured, finishRun, pumpUntilComplete, running],
+    [beginRun,  finishRun, pumpUntilComplete, running],
   );
 
   const runGroup = useCallback(
@@ -708,16 +697,7 @@ export function WorkflowTestRunnerProvider({
         setError("A workflow test is already running.");
         return;
       }
-      if (!dbConfigured) {
-        setError("Configure a database connection before running workflow tests.");
-        return;
-      }
-
       const test = await getWorkflowTest(targetTestId);
-      if (!test.agentProfileId) {
-        setError("Assign an agent to this saved test in Setup before running.");
-        return;
-      }
 
       const config: WorkflowTestRunConfig = {
         testName: options.testName,
@@ -755,7 +735,7 @@ export function WorkflowTestRunnerProvider({
         if (isActiveRun()) finishRun(controller);
       }
     },
-    [beginRun, dbConfigured, finishRun, pumpUntilComplete, running],
+    [beginRun,  finishRun, pumpUntilComplete, running],
   );
 
   const rerun = useCallback(async () => {
@@ -784,11 +764,6 @@ export function WorkflowTestRunnerProvider({
         setError("A workflow test is already running.");
         return;
       }
-      if (!dbConfigured) {
-        setError("Configure a database connection before running workflow tests.");
-        return;
-      }
-
       setTestName(options.testName);
       isRerunRef.current = true;
       const { controller, generation } = beginRun({ keepReport: true });
@@ -848,7 +823,6 @@ export function WorkflowTestRunnerProvider({
     },
     [
       beginRun,
-      dbConfigured,
       finishRun,
       hydrateFromRunSnapshot,
       pumpUntilComplete,
@@ -866,11 +840,6 @@ export function WorkflowTestRunnerProvider({
         setError("A workflow test is already running.");
         return;
       }
-      if (!dbConfigured) {
-        setError("Configure a database connection before running workflow tests.");
-        return;
-      }
-
       setTestName(options.testName);
       const { controller, generation } = beginRun({ keepReport: true });
       const isActiveRun = () => generation === runGenerationRef.current;
@@ -903,7 +872,6 @@ export function WorkflowTestRunnerProvider({
     },
     [
       beginRun,
-      dbConfigured,
       finishRun,
       hydrateFromRunSnapshot,
       pumpUntilComplete,
@@ -972,7 +940,7 @@ export function WorkflowTestRunnerProvider({
   }, [activeRunId, hydrateFromRunSnapshot, setActiveRunIdTracked]);
 
   useEffect(() => {
-    if (!dbConfigured || reconnectStartedRef.current) return;
+    if (reconnectStartedRef.current) return;
     const runId = sessionStorage.getItem(ACTIVE_RUN_STORAGE_KEY);
     if (!runId) return;
 
@@ -1055,7 +1023,6 @@ export function WorkflowTestRunnerProvider({
     };
   }, [
     beginRun,
-    dbConfigured,
     finishRun,
     hydrateFromRunSnapshot,
     pumpUntilComplete,
@@ -1065,8 +1032,6 @@ export function WorkflowTestRunnerProvider({
   // After laptop sleep / tab freeze: soft-abort a hung SSE reader so pumpUntilComplete
   // can reattach via /watch without cancelling the backend run.
   useEffect(() => {
-    if (!dbConfigured) return;
-
     const onWake = () => {
       if (document.visibilityState === "hidden") return;
 
@@ -1159,7 +1124,6 @@ export function WorkflowTestRunnerProvider({
   }, [
     appendActivity,
     beginRun,
-    dbConfigured,
     finishRun,
     hydrateFromRunSnapshot,
     pumpUntilComplete,

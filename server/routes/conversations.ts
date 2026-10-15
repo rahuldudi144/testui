@@ -16,8 +16,8 @@ import {
   streamAgentEvents,
 } from "../runAgentWithHistory.js";
 import { isPublicStreamEvent } from "../streamEventFilter.js";
-import { getActiveDatabaseForUser, parseDbHost, connectionAgentInvokeInput, countTables } from "../userDatabase.js";
-import { getActiveAgentForUser, profileAgentConfig } from "../userAgent.js";
+import { parseDbHost } from "../userDatabase.js";
+import { requireQueryTarget } from "../queryTarget.js";
 import {
   generateConversationTitle,
   isDefaultConversationTitle,
@@ -188,57 +188,44 @@ conversationRoutes.post("/:id/messages", async (c) => {
   });
   if (!conversation) return c.json({ error: "Conversation not found." }, 404);
 
+  const historyLimit = loadEnv().ASK_CHAT_HISTORY_MESSAGE_LIMIT;
   const priorRows = await prisma.message.findMany({
     where: { conversationId },
-    orderBy: { createdAt: "asc" },
+    orderBy: { createdAt: "desc" },
+    take: historyLimit > 0 ? historyLimit : 0,
     select: { role: true, content: true },
   });
+  priorRows.reverse();
 
   await prisma.message.create({
     data: { conversationId, role: "user", content: query },
   });
 
-  const activeDb = await getActiveDatabaseForUser(user.id);
-  if (!activeDb) {
-    return c.json(
-      {
-        error:
-          "No database configured. Add a PostgreSQL or MySQL connection in the Database panel.",
-      },
-      400,
-    );
+  let queryDb;
+  try {
+    queryDb = requireQueryTarget();
+  } catch (error) {
+    return c.json({ error: error instanceof Error ? error.message : "Query database is not configured." }, 400);
   }
 
-  const activeAgent = await getActiveAgentForUser(user.id);
-  const runnerOptions = profileAgentConfig(activeAgent);
-
   const messages = toAgentMessages(priorRows);
-  const dbType = activeDb.dbType as "postgres" | "mysql";
+  const dbType = queryDb.dbType;
   const { requestId, correlationId } = createAgentRequestIds(conversationId);
   beginRequestDebug(requestId, correlationId);
 
   const dbInfo = {
-    dbType: activeDb.dbType,
-    name: activeDb.name,
-    host: parseDbHost(activeDb.dbUri),
+    dbType: queryDb.dbType,
+    name: queryDb.name,
+    host: parseDbHost(queryDb.dbUri),
   };
 
   const env = loadEnv();
-  const effectiveProvider = runnerOptions.llmProvider ?? env.DB_AGENT_LLM_PROVIDER;
-  const effectiveModel = runnerOptions.modelName ?? env.DB_AGENT_MODEL_NAME;
   const agentConfig = {
-    provider: effectiveProvider,
-    model: effectiveModel,
+    provider: env.DB_AGENT_LLM_PROVIDER,
+    model: env.DB_AGENT_MODEL_NAME,
     readOnly: env.DB_AGENT_READ_ONLY,
     maxValidationRetries: env.DB_AGENT_MAX_VALIDATION_RETRIES,
   };
-
-  let agentInputBase: Awaited<ReturnType<typeof connectionAgentInvokeInput>>;
-  try {
-    agentInputBase = await connectionAgentInvokeInput(activeDb, user.id);
-  } catch (error) {
-    return c.json({ error: errorMessage(error) }, 400);
-  }
 
   if (!streamEvents && dryRun) {
     return streamSSE(c, async (stream) => {
@@ -253,7 +240,7 @@ conversationRoutes.post("/:id/messages", async (c) => {
 
         const { result, stateHistory } = await invokeWithHistory(
           dbType,
-          activeDb.dbUri,
+          queryDb.dbUri,
           {
             query,
             messages,
@@ -261,9 +248,7 @@ conversationRoutes.post("/:id/messages", async (c) => {
             requestId,
             correlationId,
             abortSignal: requestSignal,
-            ...agentInputBase,
           },
-          runnerOptions,
         );
 
         if (requestSignal.aborted) return;
@@ -291,12 +276,10 @@ conversationRoutes.post("/:id/messages", async (c) => {
           correlationId,
           {
             ...dbInfo,
-            schemaTableCount: activeDb.dbMetadata
-              ? countTables(activeDb.dbMetadata)
-              : 0,
-            metadataSource: activeDb.dbMetadata ? "stored" : "live",
-            hasBusinessContext: Boolean(activeDb.businessContext?.trim()),
-            hasKnowledgeIndexed: activeDb.schemaSyncStatus === "ready",
+            schemaTableCount: Object.keys(queryDb.dbMetadata?.tables ?? {}).length,
+            metadataSource: "live" as const,
+            hasBusinessContext: false,
+            hasKnowledgeIndexed: false,
           },
           runContext,
           { generatedSql, stateHistory },
@@ -323,12 +306,7 @@ conversationRoutes.post("/:id/messages", async (c) => {
         );
 
         const title = isDefaultConversationTitle(conversation.title)
-          ? await generateConversationTitle(
-              query,
-              conversationId,
-              dbType,
-              runnerOptions,
-            )
+          ? await generateConversationTitle(query, conversationId)
           : conversation.title;
 
         await prisma.conversation.update({
@@ -387,15 +365,14 @@ conversationRoutes.post("/:id/messages", async (c) => {
         totalTokens?: number;
       } = {};
 
-      for await (const event of streamAgentEvents(dbType, activeDb.dbUri, {
+      for await (const event of streamAgentEvents(dbType, queryDb.dbUri, {
         query,
         messages,
         dryRun,
         requestId,
         correlationId,
         abortSignal: requestSignal,
-        ...agentInputBase,
-      }, runnerOptions)) {
+      })) {
         if (requestSignal.aborted) break;
 
         collectedEvents.push(event as Record<string, unknown>);
@@ -455,12 +432,10 @@ conversationRoutes.post("/:id/messages", async (c) => {
         correlationId,
         {
           ...dbInfo,
-          schemaTableCount: activeDb.dbMetadata
-            ? countTables(activeDb.dbMetadata)
-            : 0,
-          metadataSource: activeDb.dbMetadata ? "stored" : "live",
-          hasBusinessContext: Boolean(activeDb.businessContext?.trim()),
-          hasKnowledgeIndexed: activeDb.schemaSyncStatus === "ready",
+          schemaTableCount: Object.keys(queryDb.dbMetadata?.tables ?? {}).length,
+          metadataSource: "live" as const,
+          hasBusinessContext: false,
+          hasKnowledgeIndexed: false,
         },
         runContext,
         { generatedSql, stateHistory, streamEvents: collectedEvents, ...tokenTotals },
@@ -485,12 +460,7 @@ conversationRoutes.post("/:id/messages", async (c) => {
       );
 
       const title = isDefaultConversationTitle(conversation.title)
-        ? await generateConversationTitle(
-            query,
-            conversationId,
-            dbType,
-            runnerOptions,
-          )
+        ? await generateConversationTitle(query, conversationId)
         : conversation.title;
 
       await prisma.conversation.update({

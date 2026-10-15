@@ -1,50 +1,11 @@
 /**
- * Testui-only agent runner that captures stateHistory from the graph final state.
- * Mirrors DatabaseAgent.runGraph / stream for v3 knowledge-driven invoke.
+ * Test UI query entry. Uses the same DatabaseAgent call as the main app.
+ * Suite timing and debug capture stay outside this call.
  */
-import type {
-  DatabaseAgentConfig,
-  DatabaseType,
-  InvokeInput,
-  InvokeResult,
-  StateHistoryEntry,
-} from "../../types/index.js";
-import type {
-  AgentInput,
-  AgentState,
-} from "../../schemas/state.js";
-import type { AgentRuntime } from "../../types/runtime.js";
-import { RUNTIME_KEY } from "../../types/runtime.js";
-import type { DatabaseAdapter } from "../../database/adapter.js";
-import { createAdapter } from "../../database/createAdapter.js";
-import { withLoggingAdapter } from "../../database/withLoggingAdapter.js";
-import { createEmbeddingsFromConfig } from "../../knowledge/embeddings.js";
-import type { EmbeddingsClient } from "../../knowledge/embeddings.js";
-import { createChatModel } from "../../llm/createChatModel.js";
-import {
-  createInvocationChatModel,
-  invocationUsesCustomLlm,
-  resolveInvocationLlmConfig,
-} from "../../llm/resolveInvocationLlm.js";
-import { buildGraph } from "../../graph/buildGraph.js";
-import type { CompiledAgentGraph } from "../../graph/buildGraph.js";
-import {
-  createObservabilityContext,
-  resolveRequestId,
-  toSpanError,
-  wrapAdapterWithObservability,
-  wrapLlmWithObservability,
-} from "../../observability/index.js";
-import type { ObservabilityContext } from "../../observability/types.js";
-import { loggerFromStructured } from "../../utils/logger.js";
-import type { Logger } from "../../utils/logger.js";
-import { AgentError, errorMessage } from "../../utils/errors.js";
-import { isAbortError, throwIfAborted } from "../../utils/abort.js";
-import { resolveInvocationSystemPrompt } from "../../prompts/composeSystemMessage.js";
-import { extractText } from "../../nodes/shared.js";
-import { buildConfig, createAgent } from "./agent.js";
-import type { AgentConfigOverrides } from "./agent.js";
+import type { InvokeInput, InvokeResult, StateHistoryEntry } from "../../types/index.js";
 import type { AgentEvent } from "../../types/events.js";
+import { AgentError } from "../../utils/errors.js";
+import { throwIfAborted } from "../../utils/abort.js";
 import {
   getRequestDebugSnapshot,
   subscribeRequestLogs,
@@ -53,290 +14,43 @@ import {
   createLogStreamContext,
   logEntryToAgentEvents,
 } from "./logStreamEvents.js";
+import { capAgentMessages, createQueryAgent, getLiveSchema } from "./queryTarget.js";
 
-const graph: CompiledAgentGraph = buildGraph();
-
-type RunnerOptions = AgentConfigOverrides;
-
-class AgentRunner {
-  private readonly config: DatabaseAgentConfig;
-  private readonly readOnly: boolean;
-  private readonly maxRetries: number;
-  private readonly llm: ReturnType<typeof createChatModel>;
-  private readonly embeddings: EmbeddingsClient;
-  private readonly dbUri: string;
-
-  constructor(config: DatabaseAgentConfig, dbUri: string) {
-    this.config = config;
-    this.readOnly = config.readOnly ?? true;
-    this.maxRetries = config.maxValidationRetries ?? 3;
-    this.llm = createChatModel(config);
-    // Same as DatabaseAgent: embeddings once from constructor config.
-    this.embeddings = createEmbeddingsFromConfig(config);
-    this.dbUri = dbUri;
-  }
-
-  async invoke(
-    input: InvokeInput,
-  ): Promise<{ result: InvokeResult; stateHistory: StateHistoryEntry[] }> {
-    validateInput(input);
-    const { finalState, observability } = await this.runGraph(input);
-    observability.logger.info({ event: "invoke_completed" });
-    return {
-      result: toResult(finalState),
-      stateHistory: finalState.stateHistory ?? [],
-    };
-  }
-
-  async *stream(
-    input: InvokeInput,
-  ): AsyncGenerator<string, StateHistoryEntry[]> {
-    validateInput(input);
-    throwIfAborted(input.abortSignal);
-    const observability = this.createObservability(input);
-    const logger = loggerFromStructured(observability.logger);
-    const tags = metricTags(observability);
-
-    observability.metrics.increment("agent.requests.total", tags);
-    observability.logger.info({ event: "stream_start" });
-
-    let success = false;
-    let caughtError: unknown;
-    let finalState: AgentState | undefined;
-    const adapter = await this.openAdapter(logger, observability);
-    const runtime = this.buildRuntime(input, adapter, logger, observability);
-
-    try {
-      const stream = await graph.stream(this.toInputState(input), {
-        configurable: {
-          [RUNTIME_KEY]: runtime,
-        },
-        streamMode: ["messages", "values"],
-        signal: input.abortSignal,
-      });
-
-      let streamedAnything = false;
-      let finalMarkdown = "";
-
-      for await (const chunk of stream) {
-        throwIfAborted(input.abortSignal);
-        const [mode, payload] = chunk as [string, unknown];
-
-        if (mode === "messages") {
-          const [message, metadata] = payload as [
-            Parameters<typeof extractText>[0],
-            { langgraph_node?: string },
-          ];
-          if (isMarkdownNode(metadata?.langgraph_node)) {
-            const text = extractText(message);
-            if (text) {
-              streamedAnything = true;
-              yield text;
-            }
-          }
-        } else if (mode === "values") {
-          finalState = payload as AgentState;
-          finalMarkdown = finalState.markdownResponse || finalMarkdown;
-        }
-      }
-
-      if (!streamedAnything && finalMarkdown) {
-        yield finalMarkdown;
-      }
-
-      success = true;
-      observability.metrics.increment("agent.requests.success", tags);
-      observability.logger.info({ event: "stream_completed" });
-    } catch (error) {
-      caughtError = error;
-      if (isAbortError(error)) {
-        observability.logger.info({ event: "request_aborted" });
-        throw error;
-      }
-      observability.metrics.increment("agent.requests.failed", tags);
-      observability.logger.error({
-        event: "stream_failed",
-        error: toSpanError(error),
-      });
-      throw new AgentError(
-        "STREAM_FAILED",
-        `The agent failed while streaming the answer: ${errorMessage(error)}`,
-        error,
-      );
-    } finally {
-      await closeVectorStore(runtime, logger);
-      await closeAdapter(adapter, logger);
-      completeTrace(observability, success, caughtError);
-    }
-
-    return finalState?.stateHistory ?? [];
-  }
-
-  private createObservability(input: InvokeInput): ObservabilityContext {
-    const requestId = resolveRequestId(input.requestId);
-    const llm = resolveInvocationLlmConfig(this.config, input);
-    return createObservabilityContext({
-      requestId,
-      correlationId: input.correlationId,
-      provider: llm.llmProvider,
-      model: llm.modelName,
-      dbType: this.config.dbType,
-    });
-  }
-
-  private async runGraph(
-    input: InvokeInput,
-  ): Promise<{ finalState: AgentState; observability: ObservabilityContext }> {
-    const observability = this.createObservability(input);
-    const logger = loggerFromStructured(observability.logger);
-    const tags = metricTags(observability);
-
-    observability.metrics.increment("agent.requests.total", tags);
-    observability.logger.info({ event: "invoke_start" });
-    throwIfAborted(input.abortSignal);
-
-    let success = false;
-    let caughtError: unknown;
-    let finalState: AgentState | undefined;
-    const adapter = await this.openAdapter(logger, observability);
-    const runtime = this.buildRuntime(input, adapter, logger, observability);
-
-    try {
-      finalState = (await graph.invoke(this.toInputState(input), {
-        configurable: {
-          [RUNTIME_KEY]: runtime,
-        },
-        signal: input.abortSignal,
-      })) as AgentState;
-
-      success = true;
-      observability.metrics.increment("agent.requests.success", tags);
-      return { finalState, observability };
-    } catch (error) {
-      caughtError = error;
-      if (isAbortError(error)) {
-        observability.logger.info({ event: "request_aborted" });
-        throw error;
-      }
-      observability.metrics.increment("agent.requests.failed", tags);
-      observability.logger.error({
-        event: "invoke_failed",
-        error: toSpanError(error),
-      });
-      throw new AgentError(
-        "EXECUTION_FAILED",
-        `The agent failed to answer the request: ${errorMessage(error)}`,
-        error,
-      );
-    } finally {
-      await closeVectorStore(runtime, logger);
-      await closeAdapter(adapter, logger);
-      completeTrace(observability, success, caughtError);
-    }
-  }
-
-  private async openAdapter(
-    logger: Logger,
-    observability: ObservabilityContext,
-  ): Promise<DatabaseAdapter> {
-    const base = createAdapter(this.config.dbType, this.dbUri);
-    const observing = wrapAdapterWithObservability(base, observability);
-    const adapter = withLoggingAdapter(observing, logger);
-
-    try {
-      await adapter.connect();
-      return adapter;
-    } catch (error) {
-      logger.error(`database connection failed: ${errorMessage(error)}`);
-      throw new AgentError(
-        "DB_CONNECTION_FAILED",
-        `Could not connect to the database: ${errorMessage(error)}`,
-        error,
-      );
-    }
-  }
-
-  private buildRuntime(
-    input: InvokeInput,
-    adapter: DatabaseAdapter,
-    logger: AgentRuntime["logger"],
-    observability: ObservabilityContext,
-  ): AgentRuntime {
-    const llm =
-      invocationUsesCustomLlm(this.config, input)
-        ? createInvocationChatModel(this.config, input)
-        : this.llm;
-
-    return {
-      llm: wrapLlmWithObservability(llm, observability, {
-        streamEvents: input.streamEvents ?? false,
-      }),
-      adapter,
-      dbType: this.config.dbType,
-      readOnly: this.readOnly,
-      maxRetries: this.maxRetries,
-      logger,
-      streamEvents: input.streamEvents ?? false,
-      debug: input.debug ?? false,
-      observability,
-      knowledgeDbUri: input.knowledgeDbUri ?? "",
-      userId: input.userId ?? "",
-      databaseId: input.databaseId ?? "",
-      embeddings: this.embeddings,
-      liveSchema: input.liveSchema,
-    };
-  }
-
-  private toInputState(input: InvokeInput): AgentInput {
-    return {
-      query: input.query,
-      messages: input.messages ?? [],
-      systemPrompt: resolveInvocationSystemPrompt(
-        this.config.systemPrompt,
-        input.systemPrompt,
-      ),
-      businessSummary: input.businessSummary,
-      systemPromptMode: input.systemPromptMode ?? "append",
-      knowledgeDbUri: input.knowledgeDbUri ?? "",
-      userId: input.userId ?? "",
-      databaseId: input.databaseId ?? "",
-      dryRun: input.dryRun ?? false,
-    };
-  }
-}
-
-function createRunner(
-  dbType: DatabaseType,
-  dbUri: string,
-  options?: RunnerOptions,
-): AgentRunner {
-  return new AgentRunner(buildConfig(dbType, options), dbUri);
+function queryInput(input: InvokeInput): InvokeInput {
+  return {
+    query: input.query,
+    messages: capAgentMessages(input.messages),
+    dryRun: input.dryRun,
+    requestId: input.requestId,
+    correlationId: input.correlationId,
+    abortSignal: input.abortSignal,
+    liveSchema: getLiveSchema(),
+    streamEvents: input.streamEvents,
+    debug: input.debug,
+  };
 }
 
 export async function invokeWithHistory(
-  dbType: DatabaseType,
-  dbUri: string,
+  _dbType: string,
+  _dbUri: string,
   input: InvokeInput,
-  runnerOptions?: RunnerOptions,
 ): Promise<{ result: InvokeResult; stateHistory: StateHistoryEntry[] }> {
-  return createRunner(dbType, dbUri, runnerOptions).invoke(input);
-}
-
-export function streamWithHistory(
-  dbType: DatabaseType,
-  dbUri: string,
-  input: InvokeInput,
-  runnerOptions?: RunnerOptions,
-): AsyncGenerator<string, StateHistoryEntry[]> {
-  return createRunner(dbType, dbUri, runnerOptions).stream(input);
+  const agent = createQueryAgent();
+  const result = await agent.invoke({
+    ...queryInput(input),
+    debug: true,
+  });
+  return {
+    result,
+    stateHistory: result.stateHistory ?? [],
+  };
 }
 
 /** Stream typed AgentEvents via DatabaseAgent (streamEvents + debug enabled). */
 export async function* streamAgentEvents(
-  dbType: DatabaseType,
-  dbUri: string,
+  _dbType: string,
+  _dbUri: string,
   input: Omit<InvokeInput, "streamEvents" | "debug">,
-  runnerOptions?: RunnerOptions,
 ): AsyncGenerator<AgentEvent> {
   const requestId = input.requestId;
   if (!requestId) {
@@ -346,7 +60,7 @@ export async function* streamAgentEvents(
     );
   }
 
-  const agent = createAgent(dbType, dbUri, runnerOptions);
+  const agent = createQueryAgent();
   const logContext = createLogStreamContext();
   const pending: AgentEvent[] = [];
   let logCursor = 0;
@@ -380,10 +94,9 @@ export async function* streamAgentEvents(
   const agentTask = (async () => {
     try {
       for await (const chunk of agent.stream({
-        ...input,
+        ...queryInput(input),
         streamEvents: true,
         debug: true,
-        abortSignal: input.abortSignal,
       })) {
         drainLogs();
         pending.push(
@@ -420,88 +133,5 @@ export async function* streamAgentEvents(
     if (agentError) {
       throw agentError;
     }
-  }
-}
-
-function toResult(state: AgentState): InvokeResult {
-  const usedSql = state.isDomainSpecific && state.requiresSql;
-
-  return {
-    markdownResponse: state.markdownResponse,
-    generatedSql:
-      usedSql && state.generatedSql ? state.generatedSql : undefined,
-    validationPassed: usedSql ? state.validationPassed : undefined,
-    validationErrors:
-      usedSql && state.validationErrors.length > 0
-        ? state.validationErrors
-        : undefined,
-    executionResult: state.executionResult,
-  };
-}
-
-function metricTags(
-  observability: ObservabilityContext,
-): Record<string, string> {
-  return observability.correlationId
-    ? {
-        requestId: observability.requestId,
-        correlationId: observability.correlationId,
-      }
-    : { requestId: observability.requestId };
-}
-
-function completeTrace(
-  observability: ObservabilityContext,
-  success: boolean,
-  error?: unknown,
-): void {
-  observability.tracer.complete(
-    observability.requestId,
-    success,
-    error ? toSpanError(error) : undefined,
-  );
-}
-
-function isMarkdownNode(node: string | undefined): boolean {
-  return node === "answer" || node === "formatResponse";
-}
-
-function validateInput(input: InvokeInput): void {
-  if (!input || typeof input.query !== "string" || input.query.trim() === "") {
-    throw new AgentError("INVALID_INPUT", "A non-empty query is required.");
-  }
-  if (!input.liveSchema || typeof input.liveSchema.tables !== "object") {
-    throw new AgentError("INVALID_INPUT", "liveSchema is required.");
-  }
-  if (!input.userId?.trim()) {
-    throw new AgentError("INVALID_INPUT", "userId is required.");
-  }
-  if (!input.databaseId?.trim()) {
-    throw new AgentError("INVALID_INPUT", "databaseId is required.");
-  }
-}
-
-async function closeAdapter(
-  adapter: DatabaseAdapter,
-  logger: Logger,
-): Promise<void> {
-  try {
-    await adapter.close();
-  } catch (error) {
-    logger.warn(`DB: failed to close connection — ${errorMessage(error)}`);
-  }
-}
-
-async function closeVectorStore(
-  runtime: AgentRuntime,
-  logger: Logger,
-): Promise<void> {
-  if (!runtime.vectorStore) return;
-  try {
-    await runtime.vectorStore.close();
-  } catch (error) {
-    logger.warn(
-      `Knowledge DB: failed to close connection — ${errorMessage(error)}`,
-    );
   }
 }

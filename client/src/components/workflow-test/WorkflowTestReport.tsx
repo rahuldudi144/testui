@@ -587,7 +587,7 @@ export function WorkflowTestReport({
             <DialogDescription>
               Creates a separate workflow test in Tests with the failed queries kept
               in their original groups and category types. You can load it from Tests
-              later and run with a different agent or settings. Saving again with the
+              later and run it again. Saving again with the
               same name appends new failures to that test.
             </DialogDescription>
           </DialogHeader>

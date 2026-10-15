@@ -2,7 +2,6 @@ import { useEffect, useRef, useState } from "react";
 import { Send } from "lucide-react";
 import type { ChatMessage } from "../api";
 import type { StreamProgressState } from "../lib/agentStreamProgress";
-import { Alert } from "./ui/Alert";
 import { Button } from "./ui/Button";
 import { Card } from "./ui/Card";
 import { Label } from "./ui/Label";
@@ -16,8 +15,6 @@ interface Props {
   sending: boolean;
   streamingContent: string;
   streamProgress?: StreamProgressState;
-  dbConfigured: boolean;
-  onOpenSettings?: () => void;
   onSelectDebug?: (debug: Record<string, unknown>) => void;
   selectedDebugRequestId?: string | null;
 }
@@ -29,8 +26,6 @@ export function ChatWindow({
   sending,
   streamingContent,
   streamProgress,
-  dbConfigured,
-  onOpenSettings,
   onSelectDebug,
   selectedDebugRequestId,
 }: Props) {
@@ -46,7 +41,7 @@ export function ChatWindow({
   }, [query]);
 
   async function submitQuery(text: string) {
-    if (!text || sending || !dbConfigured) return;
+    if (!text || sending) return;
     setQuery("");
     await onSend(text, dryRun);
   }
@@ -65,26 +60,6 @@ export function ChatWindow({
 
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
-      {!dbConfigured && (
-        <div className="shrink-0 px-4 pt-4 md:px-6">
-          <Alert variant="warning" title="Database not configured">
-            Add a PostgreSQL or MySQL connection in{" "}
-            {onOpenSettings ? (
-              <button
-                type="button"
-                onClick={onOpenSettings}
-                className="font-medium underline underline-offset-2 transition-colors hover:text-foreground focus-ring rounded-sm"
-              >
-                Settings
-              </button>
-            ) : (
-              "Settings"
-            )}{" "}
-            before querying.
-          </Alert>
-        </div>
-      )}
-
       <MessageList
         messages={messages}
         loading={loadingMessages}
@@ -92,7 +67,7 @@ export function ChatWindow({
         sending={sending}
         streamProgress={streamProgress}
         onExampleClick={(prompt) => {
-          if (sending || !dbConfigured) return;
+          if (sending) return;
           setQuery(prompt);
           textareaRef.current?.focus();
         }}
@@ -110,13 +85,9 @@ export function ChatWindow({
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             onKeyDown={handleKeyDown}
-            placeholder={
-              dbConfigured
-                ? "Ask about your database…"
-                : "Add a database connection first…"
-            }
+            placeholder="Ask about your database…"
             rows={2}
-            disabled={sending || !dbConfigured}
+            disabled={sending}
             className="min-h-[72px] border-0 bg-transparent px-1 shadow-none focus-visible:ring-0"
           />
           <div className="mt-2 flex items-center justify-between gap-4 border-t border-border/60 pt-2">
@@ -129,14 +100,14 @@ export function ChatWindow({
                 type="checkbox"
                 checked={dryRun}
                 onChange={(e) => setDryRun(e.target.checked)}
-                disabled={sending || !dbConfigured}
+                disabled={sending}
                 className="h-4 w-4 rounded border-input accent-primary focus-ring"
               />
               Dry run
             </Label>
             <Button
               type="submit"
-              disabled={sending || !query.trim() || !dbConfigured}
+              disabled={sending || !query.trim()}
               loading={sending}
               className="min-w-[100px]"
             >

@@ -94,20 +94,13 @@ async function boot(): Promise<void> {
   const generation = ++bootState.generation;
 
   try {
-    const { loadConnectionSchemas } = await import("./schemaCache.js");
-    const { loaded, failed } = await loadConnectionSchemas();
+    const { loadQuerySchema } = await import("./queryTarget.js");
+    await loadQuerySchema();
     if (generation !== bootState.generation) return;
-    if (loaded === 0 && failed === 0) {
-      console.log("Schema cache: no saved connections");
-    } else {
-      console.log(
-        `Schema cache: loaded ${loaded} connection(s)${failed > 0 ? `, ${failed} failed` : ""}`,
-      );
-    }
   } catch (error) {
     if (generation !== bootState.generation) return;
     console.warn(
-      "Schema load skipped:",
+      "Query schema load skipped:",
       error instanceof Error ? error.message : error,
     );
   }

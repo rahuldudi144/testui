@@ -3,11 +3,7 @@ import { useLocation, useNavigate } from "react-router-dom";
 import { Play, RotateCcw } from "lucide-react";
 import {
   getWorkflowTest,
-  listAgents,
-  listDatabases,
   updateWorkflowTestFailuresPolicy,
-  type UserAgent,
-  type UserDatabase,
   type WorkflowTestCompletePayload,
   type WorkflowTestGroupRecord,
 } from "../api";
@@ -45,11 +41,9 @@ type WorkflowTab = "tests" | "setup" | "report" | "compare" | "usage";
 
 interface Props {
   onBack: () => void;
-  dbConfigured: boolean;
-  onOpenSettings: () => void;
 }
 
-export function WorkflowTestPage({ onBack, dbConfigured, onOpenSettings }: Props) {
+export function WorkflowTestPage({ onBack }: Props) {
   const navigate = useNavigate();
   const location = useLocation();
   const {
@@ -86,11 +80,9 @@ export function WorkflowTestPage({ onBack, dbConfigured, onOpenSettings }: Props
   const [dryRun, setDryRun] = useState(false);
   const [delayMs, setDelayMs] = useState(0);
   const [agentProfileId, setAgentProfileId] = useState<string | null>(null);
-  const [agents, setAgents] = useState<UserAgent[]>([]);
   const [databaseConnectionId, setDatabaseConnectionId] = useState<string | null>(
     null,
   );
-  const [databases, setDatabases] = useState<UserDatabase[]>([]);
   const [failuresGroup, setFailuresGroup] = useState<WorkflowTestGroupRecord | null>(
     null,
   );
@@ -139,18 +131,6 @@ export function WorkflowTestPage({ onBack, dbConfigured, onOpenSettings }: Props
     setAgentProfileId(config.agentProfileId ?? null);
     setDatabaseConnectionId(config.databaseConnectionId ?? null);
   }, []);
-
-  useEffect(() => {
-    void listAgents()
-      .then((data) => setAgents(data.agents))
-      .catch(() => setAgents([]));
-  }, [savedRefreshToken]);
-
-  useEffect(() => {
-    void listDatabases()
-      .then((data) => setDatabases(data.databases))
-      .catch(() => setDatabases([]));
-  }, [savedRefreshToken]);
 
   useEffect(() => {
     if (lastConfig) {
@@ -207,15 +187,6 @@ export function WorkflowTestPage({ onBack, dbConfigured, onOpenSettings }: Props
       setLocalError("Add at least one query before running.");
       return;
     }
-    if (!dbConfigured) {
-      setLocalError("Configure a database connection before running workflow tests.");
-      return;
-    }
-    if (!config.agentProfileId) {
-      setLocalError("Select an agent for this test before running.");
-      return;
-    }
-
     syncFormFromConfig(config);
     setLocalError(null);
     clearError();
@@ -485,7 +456,7 @@ export function WorkflowTestPage({ onBack, dbConfigured, onOpenSettings }: Props
                 type="button"
                 onClick={() => void handleRun()}
                 loading={running}
-                disabled={running || !agentProfileId || totalQueries === 0}
+                disabled={running || totalQueries === 0}
               >
                 <Play className="h-4 w-4" />
                 Run workflow test
@@ -493,20 +464,6 @@ export function WorkflowTestPage({ onBack, dbConfigured, onOpenSettings }: Props
             </div>
           }
         />
-
-        {!dbConfigured && (
-          <Alert variant="warning" className="mb-4">
-            Configure a database in{" "}
-            <button
-              type="button"
-              onClick={onOpenSettings}
-              className="font-medium underline underline-offset-2 focus-ring rounded-sm"
-            >
-              Settings
-            </button>{" "}
-            before running tests.
-          </Alert>
-        )}
 
         {error && (
           <Alert
@@ -590,12 +547,6 @@ export function WorkflowTestPage({ onBack, dbConfigured, onOpenSettings }: Props
                 onTestNameChange={setTestName}
                 groups={groups}
                 onGroupsChange={setGroups}
-                agents={agents}
-                agentProfileId={agentProfileId}
-                onAgentProfileIdChange={setAgentProfileId}
-                databases={databases}
-                databaseConnectionId={databaseConnectionId}
-                onDatabaseConnectionIdChange={setDatabaseConnectionId}
                 dryRun={dryRun}
                 onDryRunChange={setDryRun}
                 delayMs={delayMs}
