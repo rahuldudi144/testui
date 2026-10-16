@@ -17,7 +17,7 @@ import {
   type PlannedQueryItem,
   type QueryRunResult,
 } from "../stressTestAnalyze.js";
-import { envQuerySetup } from "../queryTarget.js";
+import { envQuerySetup, schemaContextSummary } from "../queryTarget.js";
 import {
   expectedOutcomeToAgentOutcome,
   resolveExecution,
@@ -217,8 +217,6 @@ interface RunWorkflowTestOptions {
   groupIds?: string[];
   dryRun: boolean;
   delayMs: number;
-  agentProfileId?: string | null;
-  databaseConnectionId?: string | null;
   goldenSetId?: string | null;
   repeats?: number;
   retryInfra?: boolean;
@@ -375,6 +373,7 @@ async function runWorkflowQueryItems(
   });
 
   let historyMessages: Message[] = [];
+  let priorSql: string[] = [];
   let currentGroupId: string | null = null;
   let consecutiveInfraErrors = 0;
   const completedDurations: number[] = [];
@@ -433,6 +432,7 @@ async function runWorkflowQueryItems(
       await finishGroupSnapshot();
       currentGroupId = groupId;
       historyMessages = [];
+      priorSql = [];
       if (golden?.snapshotGroups.has(groupName)) {
         snapshotGroup = groupName;
         snapshotBefore = await readDbSnapshot(golden.scoringDbUri, golden.schema).catch(
@@ -443,6 +443,7 @@ async function runWorkflowQueryItems(
 
     const messagesForInvoke =
       policy.history === "KEEP" ? [...historyMessages] : [];
+    const priorSqlForInvoke = policy.history === "KEEP" ? [...priorSql] : [];
 
     const itemDryRun = queryContext.dryRun;
     const itemDelayMs = queryContext.delayMs;
@@ -524,6 +525,7 @@ async function runWorkflowQueryItems(
             categoryType,
             expectedOutcome: policy.expectedOutcome,
             messages: messagesForInvoke,
+            priorSql: priorSqlForInvoke,
             history: policy.history,
             stopOnFailure: policy.stopOnFailure,
             timeoutMs: policy.timeoutMs,
@@ -662,6 +664,9 @@ async function runWorkflowQueryItems(
         },
       ];
       historyMessages = nextHistory.slice(limit > 0 ? -limit : 0);
+      if (runResult.generatedSql) {
+        priorSql = [...priorSql, runResult.generatedSql].slice(limit > 0 ? -limit : 0);
+      }
     }
 
     if (abort.isAborted()) {
@@ -761,13 +766,11 @@ async function executeWorkflowTestRun(
     groupIds,
     dryRun,
     delayMs,
-    agentProfileId,
-    databaseConnectionId,
   } = options;
 
   const testRow = await prisma.workflowTest.findFirst({
     where: { id: testId, userId },
-    select: { databaseConnectionId: true, suiteKey: true },
+    select: { suiteKey: true },
   });
 
   let setup: ReturnType<typeof envQuerySetup>;
@@ -819,7 +822,6 @@ async function executeWorkflowTestRun(
     data: {
       userId,
       workflowTestId: testId,
-      agentProfileId: null,
       agent: snapshot as unknown as Prisma.InputJsonValue,
       testName,
       dryRun,
@@ -921,8 +923,6 @@ async function executeResumeWorkflowTestRun(
     include: {
       workflowTest: {
         select: {
-          agentProfileId: true,
-          databaseConnectionId: true,
           suiteKey: true,
           goldenSetId: true,
         },
@@ -1095,8 +1095,6 @@ async function executeRerunFailuresInRun(
     include: {
       workflowTest: {
         select: {
-          agentProfileId: true,
-          databaseConnectionId: true,
           suiteKey: true,
           goldenSetId: true,
         },
@@ -1188,7 +1186,6 @@ async function executeRerunFailuresInRun(
   await prisma.workflowTestRun.update({
     where: { id: runId },
     data: {
-      agentProfileId: null,
       agent: snapshot as unknown as Prisma.InputJsonValue,
       summary: buildWorkflowRunSummary(
         existingResults,
@@ -1584,12 +1581,6 @@ workflowTestRoutes.get("/", async (c) => {
     where: { userId: user.id },
     orderBy: { updatedAt: "desc" },
     include: {
-      agentProfile: {
-        select: { id: true, name: true, llmProvider: true, modelName: true },
-      },
-      databaseConnection: {
-        select: { id: true, name: true, dbType: true },
-      },
       runs: {
         orderBy: { ranAt: "desc" },
         take: 1,
@@ -1862,13 +1853,6 @@ workflowTestRoutes.post("/:testId/groups/:groupId/run", async (c) => {
   const dryRun = body.dryRun ?? test.dryRun;
   const delayMs = Math.max(0, body.delayMs ?? test.delayMs);
 
-  if (!test.agentProfileId) {
-    return c.json(
-      { error: "This saved test has no agent. Assign an agent in Setup before running." },
-      400,
-    );
-  }
-
   return streamSSE(c, async (stream) => {
     const keepAlive = setInterval(() => {
       void stream.writeSSE({ event: "ping", data: "{}" });
@@ -1884,8 +1868,6 @@ workflowTestRoutes.post("/:testId/groups/:groupId/run", async (c) => {
           groupIds: [groupId],
           dryRun,
           delayMs,
-          agentProfileId: test.agentProfileId,
-          databaseConnectionId: test.databaseConnectionId,
         },
         stream,
       );
@@ -1937,7 +1919,7 @@ workflowTestRoutes.post("/preflight", async (c) => {
     preflight.blocked = true;
     preflight.onlyFingerprintBlocked = false;
   }
-  return c.json(preflight);
+  return c.json({ ...preflight, agentSchema: schemaContextSummary() });
 });
 
 workflowTestRoutes.get("/:testId", async (c) => {
@@ -1947,12 +1929,6 @@ workflowTestRoutes.get("/:testId", async (c) => {
   const test = await prisma.workflowTest.findFirst({
     where: { id: testId, userId: user.id },
     include: {
-      agentProfile: {
-        select: { id: true, name: true, llmProvider: true, modelName: true },
-      },
-      databaseConnection: {
-        select: { id: true, name: true, dbType: true },
-      },
       runs: {
         orderBy: { ranAt: "desc" },
         take: 20,
@@ -1986,20 +1962,13 @@ workflowTestRoutes.post("/:testId/duplicate", async (c) => {
   const user = c.get("user");
   const testId = c.req.param("testId");
   const body = await c.req.json<{
-    agentProfileId?: string;
     testName?: string;
   }>();
-
-  const agentProfileId = body.agentProfileId?.trim();
-  if (!agentProfileId) {
-    return c.json({ error: "agentProfileId is required." }, 400);
-  }
 
   try {
     const result = await duplicateWorkflowTestForAgent({
       sourceTestId: testId,
       userId: user.id,
-      agentProfileId,
       testName: body.testName,
     });
     return c.json(result, 201);
@@ -2086,8 +2055,6 @@ workflowTestRoutes.post("/run", async (c) => {
 
   const dryRun = body.dryRun ?? false;
   const delayMs = Math.max(0, body.delayMs ?? 0);
-  const agentProfileId = body.agentProfileId?.trim() || null;
-  const databaseConnectionId = body.databaseConnectionId?.trim() || null;
 
   const goldenSetId = body.goldenSetId?.trim() || null;
   const repeats = clampRepeats(body.repeats ?? 1);
@@ -2120,8 +2087,6 @@ workflowTestRoutes.post("/run", async (c) => {
 
   const savedTest = await upsertWorkflowTest(user.id, {
     testName,
-    agentProfileId,
-    databaseConnectionId,
     dryRun,
     delayMs,
     goldenSetId,
@@ -2150,8 +2115,6 @@ workflowTestRoutes.post("/run", async (c) => {
           groupIds,
           dryRun,
           delayMs,
-          agentProfileId: agentProfileId ?? savedTest.agentProfileId,
-          databaseConnectionId,
           goldenSetId,
           repeats,
           retryInfra: body.retryInfra !== false,

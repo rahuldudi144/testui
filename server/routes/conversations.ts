@@ -193,9 +193,12 @@ conversationRoutes.post("/:id/messages", async (c) => {
     where: { conversationId },
     orderBy: { createdAt: "desc" },
     take: historyLimit > 0 ? historyLimit : 0,
-    select: { role: true, content: true },
+    select: { role: true, content: true, generatedSql: true },
   });
   priorRows.reverse();
+  const priorSql = priorRows
+    .map((row) => row.generatedSql)
+    .filter((sql): sql is string => Boolean(sql));
 
   await prisma.message.create({
     data: { conversationId, role: "user", content: query },
@@ -244,6 +247,7 @@ conversationRoutes.post("/:id/messages", async (c) => {
           {
             query,
             messages,
+            priorSql,
             dryRun: true,
             requestId,
             correlationId,
@@ -368,6 +372,7 @@ conversationRoutes.post("/:id/messages", async (c) => {
       for await (const event of streamAgentEvents(dbType, queryDb.dbUri, {
         query,
         messages,
+        priorSql,
         dryRun,
         requestId,
         correlationId,

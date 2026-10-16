@@ -454,7 +454,7 @@ export async function fetchDatabaseSchema(
 }
 
 export interface ManagedUser extends User {
-  _count: { conversations: number; databases: number };
+  _count: { conversations: number };
 }
 
 export async function listUsers(): Promise<ManagedUser[]> {
@@ -995,6 +995,12 @@ export interface GoldenPreflightReport {
   fingerprintStatus: "none" | "ok" | "warn" | "block";
   schemaHash: string | null;
   join: { matched: number; notScored: string[]; orphaned: string[] };
+  agentSchema?: {
+    schemaHash: string | null;
+    tables: number;
+    enumColumns: number;
+    builtAt: string | null;
+  };
 }
 
 export function uploadGoldenSet(input: {
@@ -1149,7 +1155,7 @@ export async function deleteWorkflowTest(testId: string): Promise<void> {
 
 export async function duplicateWorkflowTest(
   testId: string,
-  input: { agentProfileId: string; testName?: string },
+  input: { testName?: string },
 ): Promise<{
   test: {
     id: string;

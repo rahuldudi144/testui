@@ -3,13 +3,13 @@ import { cors } from "hono/cors";
 import { serveStatic } from "hono/bun";
 import { authRoutes } from "./routes/auth.js";
 import { conversationRoutes } from "./routes/conversations.js";
-import { databaseRoutes } from "./routes/databases.js";
-import { agentRoutes } from "./routes/agents.js";
 import { userRoutes } from "./routes/users.js";
 import { workflowTestRoutes } from "./routes/workflowTest.js";
 import { observabilityRoutes } from "./routes/observability.js";
 import { loadEnv, isProduction } from "./env.js";
 import { getSessionUser } from "./auth.js";
+import { authMiddleware } from "./routes/auth.js";
+import { refreshQuerySchema, schemaContextSummary } from "./queryTarget.js";
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
@@ -36,7 +36,24 @@ app.use(
   }),
 );
 
-app.get("/api/health", (c) => c.json({ ok: true }));
+app.get("/api/health", (c) => {
+  const schema = schemaContextSummary();
+  return c.json({
+    ok: true,
+    schemaReady: schema.schemaHash !== null,
+    schemaHash: schema.schemaHash,
+  });
+});
+
+app.post("/api/schema/refresh", authMiddleware, async (c) => {
+  try {
+    const schema = await refreshQuerySchema();
+    if (!schema) return c.json({ schemaReady: false, schemaHash: null }, 503);
+    return c.json({ schemaReady: true, ...schemaContextSummary() });
+  } catch {
+    return c.json({ schemaReady: false, schemaHash: null }, 503);
+  }
+});
 
 app.get("/api/me", async (c) => {
   const user = await getSessionUser(c);
@@ -45,8 +62,6 @@ app.get("/api/me", async (c) => {
 
 app.route("/api/auth", authRoutes);
 app.route("/api/conversations", conversationRoutes);
-app.route("/api/databases", databaseRoutes);
-app.route("/api/agents", agentRoutes);
 app.route("/api/users", userRoutes);
 app.route("/api/workflow-test", workflowTestRoutes);
 app.route("/api/observability", observabilityRoutes);

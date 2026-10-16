@@ -14,9 +14,17 @@ import {
   createLogStreamContext,
   logEntryToAgentEvents,
 } from "./logStreamEvents.js";
-import { capAgentMessages, createQueryAgent, getLiveSchema } from "./queryTarget.js";
+import { loadEnv } from "./env.js";
+import {
+  capAgentMessages,
+  createQueryAgent,
+  ensureQuerySchema,
+  getSchemaContext,
+} from "./queryTarget.js";
 
 function queryInput(input: InvokeInput): InvokeInput {
+  const summary = loadEnv().DB_AGENT_BUSINESS_SUMMARY?.trim();
+  const schemaContext = getSchemaContext();
   return {
     query: input.query,
     messages: capAgentMessages(input.messages),
@@ -24,7 +32,10 @@ function queryInput(input: InvokeInput): InvokeInput {
     requestId: input.requestId,
     correlationId: input.correlationId,
     abortSignal: input.abortSignal,
-    liveSchema: getLiveSchema(),
+    liveSchema: schemaContext?.liveSchema,
+    schemaContext,
+    businessSummary: input.businessSummary ?? (summary || undefined),
+    priorSql: input.priorSql,
     streamEvents: input.streamEvents,
     debug: input.debug,
   };
@@ -35,6 +46,7 @@ export async function invokeWithHistory(
   _dbUri: string,
   input: InvokeInput,
 ): Promise<{ result: InvokeResult; stateHistory: StateHistoryEntry[] }> {
+  await ensureQuerySchema();
   const agent = createQueryAgent();
   const result = await agent.invoke({
     ...queryInput(input),
@@ -60,6 +72,7 @@ export async function* streamAgentEvents(
     );
   }
 
+  await ensureQuerySchema();
   const agent = createQueryAgent();
   const logContext = createLogStreamContext();
   const pending: AgentEvent[] = [];

@@ -1,197 +1,21 @@
-import type { DatabaseMetadata, DatabaseType } from "../../types/index.js";
-import { prisma } from "./db.js";
-import { ensureConnectionSchema } from "./schemaCache.js";
-
-export type SchemaSyncStatus = "idle" | "syncing" | "ready" | "failed";
+/** Host label for a database URI. The password is not included. */
+export function parseDbHost(dbUri: string): string {
+  try {
+    const url = new URL(dbUri);
+    const port = url.port ? `:${url.port}` : "";
+    return `${url.hostname}${port}`;
+  } catch {
+    return "database";
+  }
+}
 
 export function countTables(metadata: unknown): number {
   if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) {
     return 0;
   }
-  const record = metadata as Record<string, unknown>;
-  const tables = record.tables;
+  const tables = (metadata as { tables?: unknown }).tables;
   if (tables && typeof tables === "object" && !Array.isArray(tables)) {
     return Object.keys(tables).length;
   }
   return 0;
-}
-
-export interface UserDatabase {
-  id: string;
-  name: string;
-  dbType: DatabaseType;
-  dbUri: string;
-  host: string;
-  knowledgeDbUri: string | null;
-  hasEnvKnowledgeDbUri: boolean;
-  businessContext: string | null;
-  schemaSyncStatus: SchemaSyncStatus;
-  schemaSyncedAt: string | null;
-  schemaSyncError: string | null;
-  schemaTableCount: number;
-  hasBusinessContext: boolean;
-  createdAt: string;
-  updatedAt: string;
-}
-
-export function parseDbHost(dbUri: string): string {
-  try {
-    const url = new URL(dbUri);
-    const port = url.port ? `:${url.port}` : "";
-    return `${url.hostname}${port}${url.pathname}`;
-  } catch {
-    return "invalid-uri";
-  }
-}
-
-export function resolveKnowledgeDbUri(connection: {
-  knowledgeDbUri?: string | null;
-}): string {
-  const fromConnection = connection.knowledgeDbUri?.trim();
-  if (fromConnection) return fromConnection;
-
-  throw new Error("Knowledge indexing is not configured.");
-}
-
-/** Knowledge URI for indexing only (Build knowledge). Chat does not use this. */
-export function resolveKnowledgeDbUriForIndexing(connection: {
-  knowledgeDbUri?: string | null;
-}): string {
-  return resolveKnowledgeDbUri(connection);
-}
-
-export type ConnectionAgentInvokeFields = {
-  liveSchema: DatabaseMetadata;
-  userId: string;
-  databaseId: string;
-  businessSummary?: string;
-};
-
-/**
- * InvokeInput fields for testui chat / workflow.
- * Uses the startup schema cache, then Prisma, then one live fetch.
- */
-export async function connectionAgentInvokeInput(
-  connection: {
-    id: string;
-    dbType: string;
-    dbUri: string;
-    dbMetadata?: unknown;
-    knowledgeDbUri?: string | null;
-    businessContext?: string | null;
-  },
-  userId: string,
-): Promise<ConnectionAgentInvokeFields> {
-  const liveSchema = await ensureConnectionSchema(connection);
-  const businessSummary = connection.businessContext?.trim();
-  return {
-    liveSchema,
-    userId,
-    databaseId: connection.id,
-    businessSummary: businessSummary || undefined,
-  };
-}
-
-export function toPublicDatabase(row: {
-  id: string;
-  name: string;
-  dbType: string;
-  dbUri: string;
-  knowledgeDbUri?: string | null;
-  businessContext?: string | null;
-  dbMetadata?: unknown;
-  schemaSyncStatus?: string;
-  schemaSyncedAt?: Date | null;
-  schemaSyncError?: string | null;
-  createdAt: Date;
-  updatedAt: Date;
-}): UserDatabase {
-  const businessContext = row.businessContext ?? null;
-  const knowledgeDbUri = row.knowledgeDbUri?.trim() || null;
-  return {
-    id: row.id,
-    name: row.name,
-    dbType: row.dbType as DatabaseType,
-    dbUri: row.dbUri,
-    host: parseDbHost(row.dbUri),
-    knowledgeDbUri,
-    hasEnvKnowledgeDbUri: false,
-    businessContext,
-    schemaSyncStatus: (row.schemaSyncStatus ?? "idle") as SchemaSyncStatus,
-    schemaSyncedAt: row.schemaSyncedAt?.toISOString() ?? null,
-    schemaSyncError: row.schemaSyncError ?? null,
-    schemaTableCount: countTables(row.dbMetadata),
-    hasBusinessContext: Boolean(businessContext?.trim()),
-    createdAt: row.createdAt.toISOString(),
-    updatedAt: row.updatedAt.toISOString(),
-  };
-}
-
-export async function getActiveDatabaseForUser(userId: string) {
-  const user = await prisma.user.findUnique({
-    where: { id: userId },
-    include: { activeDatabase: true },
-  });
-
-  if (!user?.activeDatabase) {
-    return null;
-  }
-
-  return user.activeDatabase;
-}
-
-/**
- * Resolve DB for a workflow test run:
- * request override → pinned on test → active database.
- */
-export async function resolveDatabaseForWorkflowTest(
-  userId: string,
-  options?: {
-    databaseConnectionId?: string | null;
-    testDatabaseConnectionId?: string | null;
-  },
-) {
-  const requested = options?.databaseConnectionId?.trim();
-  if (requested) {
-    const connection = await prisma.databaseConnection.findFirst({
-      where: { id: requested, userId },
-    });
-    if (!connection) {
-      throw new Error("Database connection not found.");
-    }
-    return connection;
-  }
-
-  const pinned = options?.testDatabaseConnectionId?.trim();
-  if (pinned) {
-    const connection = await prisma.databaseConnection.findFirst({
-      where: { id: pinned, userId },
-    });
-    if (!connection) {
-      throw new Error("Pinned database connection was not found.");
-    }
-    return connection;
-  }
-
-  return getActiveDatabaseForUser(userId);
-}
-
-export async function setActiveDatabase(userId: string, databaseId: string) {
-  const connection = await prisma.databaseConnection.findFirst({
-    where: { id: databaseId, userId },
-  });
-  if (!connection) {
-    throw new Error("Database connection not found.");
-  }
-
-  await prisma.user.update({
-    where: { id: userId },
-    data: { activeDatabaseId: databaseId },
-  });
-
-  return connection;
-}
-
-export function validateDbType(dbType: string): dbType is DatabaseType {
-  return dbType === "postgres" || dbType === "mysql";
 }

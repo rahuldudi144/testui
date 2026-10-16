@@ -3,7 +3,6 @@ import type {
   LlmProvider,
 } from "../../types/index.js";
 import type { AgentConfigOverrides } from "./agent.js";
-import { prisma } from "./db.js";
 import { normalizeEmbeddingProviderInput } from "./validateAgentLlm.js";
 
 function resolveOllamaEmbeddingBaseUrl(
@@ -67,31 +66,6 @@ export function toPublicAgent(row: {
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
   };
-}
-
-export async function getActiveAgentForUser(userId: string) {
-  const user = await prisma.user.findUnique({
-    where: { id: userId },
-    include: { activeAgent: true },
-  });
-
-  return user?.activeAgent ?? null;
-}
-
-export async function setActiveAgent(userId: string, agentId: string) {
-  const agent = await prisma.agentProfile.findFirst({
-    where: { id: agentId, userId },
-  });
-  if (!agent) {
-    throw new Error("Agent profile not found.");
-  }
-
-  await prisma.user.update({
-    where: { id: userId },
-    data: { activeAgentId: agentId },
-  });
-
-  return agent;
 }
 
 export function profileAgentConfig(

@@ -21,7 +21,7 @@ userRoutes.get("/", async (c) => {
       username: true,
       createdAt: true,
       _count: {
-        select: { conversations: true, databases: true },
+        select: { conversations: true },
       },
     },
   });

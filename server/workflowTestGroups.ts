@@ -472,7 +472,6 @@ export async function importFailuresFromRun(
     where: {
       userId,
       name: testName,
-      agentProfileId: parent.agentProfileId ?? null,
     },
   });
 
@@ -485,7 +484,6 @@ export async function importFailuresFromRun(
       data: {
         dryRun: parent.dryRun,
         delayMs: parent.delayMs,
-        databaseConnectionId: parent.databaseConnectionId,
       },
     });
   } else {
@@ -493,8 +491,6 @@ export async function importFailuresFromRun(
       data: {
         userId,
         name: testName,
-        agentProfileId: parent.agentProfileId,
-        databaseConnectionId: parent.databaseConnectionId,
         dryRun: parent.dryRun,
         delayMs: parent.delayMs,
         suiteKey: parent.suiteKey ?? parent.id,

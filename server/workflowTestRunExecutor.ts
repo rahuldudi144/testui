@@ -111,6 +111,7 @@ export interface QueryItem {
   /** @deprecated Prefer expectedOutcome */
   expectedResult?: string;
   messages?: Message[];
+  priorSql?: string[];
   history?: "RESET" | "KEEP";
   stopOnFailure?: boolean;
   timeoutMs?: number;
@@ -213,6 +214,7 @@ async function runQueryItem(
       {
         query,
         messages,
+        priorSql: item.priorSql,
         dryRun,
         requestId,
         correlationId,

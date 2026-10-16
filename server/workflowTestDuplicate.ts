@@ -1,11 +1,11 @@
 import { prisma } from "./db.js";
+import { loadEnv } from "./env.js";
 import { saveManualGroups } from "./workflowTestGroups.js";
 import type { WorkflowTestGroupRecord } from "./parseStressQueries.js";
 
 export interface DuplicateWorkflowTestInput {
   sourceTestId: string;
   userId: string;
-  agentProfileId: string;
   testName?: string;
 }
 
@@ -13,7 +13,7 @@ export interface DuplicateWorkflowTestResult {
   test: {
     id: string;
     name: string;
-    agentProfileId: string;
+    agentProfileId: null;
     suiteKey: string;
     dryRun: boolean;
     delayMs: number;
@@ -24,7 +24,7 @@ export interface DuplicateWorkflowTestResult {
 export async function duplicateWorkflowTestForAgent(
   input: DuplicateWorkflowTestInput,
 ): Promise<DuplicateWorkflowTestResult> {
-  const { sourceTestId, userId, agentProfileId } = input;
+  const { sourceTestId, userId } = input;
 
   const source = await prisma.workflowTest.findFirst({
     where: { id: sourceTestId, userId },
@@ -43,24 +43,14 @@ export async function duplicateWorkflowTestForAgent(
     throw new Error("Workflow test not found.");
   }
 
-  const targetAgent = await prisma.agentProfile.findFirst({
-    where: { id: agentProfileId, userId },
-  });
-  if (!targetAgent) {
-    throw new Error("Agent profile not found.");
-  }
-
   const suiteKey = source.suiteKey ?? source.id;
-  const defaultName = `${source.name} — ${targetAgent.name}`;
-  const testName = input.testName?.trim() || defaultName;
+  const testName = input.testName?.trim() || `${source.name} copy`;
 
   const existing = await prisma.workflowTest.findFirst({
-    where: { userId, name: testName, agentProfileId },
+    where: { userId, name: testName },
   });
   if (existing) {
-    throw new Error(
-      `A test named "${testName}" already exists for this agent.`,
-    );
+    throw new Error(`A test named "${testName}" already exists.`);
   }
 
   const manualGroups = source.groups.map((group) => ({
@@ -77,8 +67,6 @@ export async function duplicateWorkflowTestForAgent(
     data: {
       userId,
       name: testName,
-      agentProfileId,
-      databaseConnectionId: source.databaseConnectionId,
       suiteKey,
       dryRun: source.dryRun,
       delayMs: source.delayMs,
@@ -91,7 +79,7 @@ export async function duplicateWorkflowTestForAgent(
     test: {
       id: created.id,
       name: created.name,
-      agentProfileId,
+      agentProfileId: null,
       suiteKey,
       dryRun: created.dryRun,
       delayMs: created.delayMs,
@@ -104,19 +92,16 @@ export async function upsertWorkflowTest(
   userId: string,
   input: {
     testName: string;
-    agentProfileId?: string | null;
-    databaseConnectionId?: string | null;
     dryRun: boolean;
     delayMs: number;
     suiteKey?: string | null;
     goldenSetId?: string | null;
   },
-): Promise<{ id: string; suiteKey: string; agentProfileId: string | null }> {
+): Promise<{ id: string; suiteKey: string; agentProfileId: null }> {
   const existing = await prisma.workflowTest.findFirst({
     where: {
       userId,
       name: input.testName,
-      agentProfileId: input.agentProfileId ?? null,
     },
   });
 
@@ -126,14 +111,13 @@ export async function upsertWorkflowTest(
       data: {
         dryRun: input.dryRun,
         delayMs: input.delayMs,
-        databaseConnectionId: input.databaseConnectionId ?? null,
         ...(input.goldenSetId ? { goldenSetId: input.goldenSetId } : {}),
       },
     });
     return {
       id: updated.id,
       suiteKey: updated.suiteKey ?? updated.id,
-      agentProfileId: updated.agentProfileId,
+      agentProfileId: null,
     };
   }
 
@@ -141,8 +125,6 @@ export async function upsertWorkflowTest(
     data: {
       userId,
       name: input.testName,
-      agentProfileId: input.agentProfileId ?? null,
-      databaseConnectionId: input.databaseConnectionId ?? null,
       dryRun: input.dryRun,
       delayMs: input.delayMs,
       suiteKey: input.suiteKey ?? undefined,
@@ -158,55 +140,34 @@ export async function upsertWorkflowTest(
     });
   }
 
-  return { id: created.id, suiteKey, agentProfileId: created.agentProfileId };
+  return { id: created.id, suiteKey, agentProfileId: null };
 }
 
 export function toWorkflowTestSummary(test: {
   id: string;
   name: string;
-  agentProfileId: string | null;
-  databaseConnectionId?: string | null;
   suiteKey: string | null;
   dryRun: boolean;
   delayMs: number;
   createdAt: Date;
   updatedAt: Date;
-  agentProfile?: {
-    id: string;
-    name: string;
-    llmProvider: string | null;
-    modelName: string | null;
-  } | null;
-  databaseConnection?: {
-    id: string;
-    name: string;
-    dbType: string;
-  } | null;
 }) {
   return {
     id: test.id,
     name: test.name,
-    agentProfileId: test.agentProfileId,
-    databaseConnectionId: test.databaseConnectionId ?? null,
+    agentProfileId: null,
+    databaseConnectionId: null,
     suiteKey: test.suiteKey,
     dryRun: test.dryRun,
     delayMs: test.delayMs,
     createdAt: test.createdAt.toISOString(),
     updatedAt: test.updatedAt.toISOString(),
-    agent: test.agentProfile
-      ? {
-          id: test.agentProfile.id,
-          name: test.agentProfile.name,
-          llmProvider: test.agentProfile.llmProvider,
-          modelName: test.agentProfile.modelName,
-        }
-      : null,
-    database: test.databaseConnection
-      ? {
-          id: test.databaseConnection.id,
-          name: test.databaseConnection.name,
-          dbType: test.databaseConnection.dbType,
-        }
-      : null,
+    agent: {
+      id: "env",
+      name: loadEnv().DB_AGENT_MODEL_NAME,
+      llmProvider: loadEnv().DB_AGENT_LLM_PROVIDER,
+      modelName: loadEnv().DB_AGENT_MODEL_NAME,
+    },
+    database: null,
   };
 }

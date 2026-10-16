@@ -154,6 +154,17 @@ export function GoldenSetup({
         </ul>
       )}
 
+      {preflight?.agentSchema && (
+        <p className="text-xs text-muted-foreground">
+          Agent schema context: hash {preflight.agentSchema.schemaHash ?? "not loaded"},{" "}
+          {preflight.agentSchema.tables} tables, {preflight.agentSchema.enumColumns} enum columns
+          {preflight.agentSchema.builtAt
+            ? `, built ${new Date(preflight.agentSchema.builtAt).toLocaleString()}`
+            : ""}
+          .
+        </p>
+      )}
+
       {preflight && (
         <div className="grid gap-2 sm:grid-cols-2">
           {preflight.checks.map((check) => (

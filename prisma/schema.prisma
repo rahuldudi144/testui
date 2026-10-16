@@ -11,65 +11,11 @@ model User {
   username         String               @unique
   passwordHash     String
   createdAt        DateTime             @default(now())
-  activeDatabaseId String?
-  activeDatabase   DatabaseConnection?  @relation("ActiveDatabase", fields: [activeDatabaseId], references: [id], onDelete: SetNull)
-  activeAgentId    String?
-  activeAgent      AgentProfile?        @relation("ActiveAgent", fields: [activeAgentId], references: [id], onDelete: SetNull)
   conversations    Conversation[]
-  databases        DatabaseConnection[] @relation("UserDatabases")
-  agents           AgentProfile[]       @relation("UserAgents")
   workflowTests    WorkflowTest[]
   workflowTestRuns WorkflowTestRun[]
   queryExecutions  QueryExecution[]
   goldenSets       GoldenSet[]
-}
-
-model AgentProfile {
-  id             String            @id @default(cuid())
-  userId         String
-  user           User              @relation("UserAgents", fields: [userId], references: [id], onDelete: Cascade)
-  activeForUsers User[]            @relation("ActiveAgent")
-  name           String
-  systemPrompt   String?           @db.Text
-  llmProvider    String?
-  modelName      String?
-  apiKey         String?           @db.Text
-  baseUrl        String?           @db.Text
-  embeddingProvider  String?
-  embeddingModelName String?
-  embeddingApiKey    String?           @db.Text
-  embeddingBaseUrl   String?           @db.Text
-  /** Optional pgvector size; unset → derived from embedding model. */
-  embeddingDimension Int?
-  createdAt      DateTime          @default(now())
-  updatedAt      DateTime          @updatedAt
-  workflowTests  WorkflowTest[]
-  workflowTestRuns WorkflowTestRun[]
-
-  @@index([userId])
-}
-
-model DatabaseConnection {
-  id               String    @id @default(cuid())
-  userId           String
-  user             User      @relation("UserDatabases", fields: [userId], references: [id], onDelete: Cascade)
-  activeForUsers   User[]    @relation("ActiveDatabase")
-  name             String
-  dbType           String
-  dbUri            String    @db.Text
-  /** Optional override; falls back to env KNOWLEDGE_DB_URI. */
-  knowledgeDbUri   String?   @db.Text
-  businessContext  String?   @db.Text
-  /** Cached live schema JSON used for preview / schemaHash. */
-  dbMetadata       Json?
-  schemaSyncedAt   DateTime?
-  schemaSyncStatus String    @default("idle")
-  schemaSyncError  String?   @db.Text
-  createdAt        DateTime  @default(now())
-  updatedAt        DateTime  @updatedAt
-  workflowTests    WorkflowTest[]
-
-  @@index([userId])
 }
 
 model Conversation {
@@ -103,10 +49,6 @@ model WorkflowTest {
   userId               String
   user                 User                @relation(fields: [userId], references: [id], onDelete: Cascade)
   name                 String
-  agentProfileId       String?
-  agentProfile         AgentProfile?       @relation(fields: [agentProfileId], references: [id], onDelete: SetNull)
-  databaseConnectionId String?
-  databaseConnection   DatabaseConnection? @relation(fields: [databaseConnectionId], references: [id], onDelete: SetNull)
   suiteKey             String?
   goldenSetId          String?
   goldenSet            GoldenSet?          @relation(fields: [goldenSetId], references: [id], onDelete: SetNull)
@@ -117,10 +59,9 @@ model WorkflowTest {
   groups               WorkflowTestGroup[]
   runs                 WorkflowTestRun[]
 
-  @@unique([userId, name, agentProfileId])
+  @@unique([userId, name])
   @@index([userId, updatedAt(sort: Desc)])
   @@index([userId, suiteKey])
-  @@index([databaseConnectionId])
 }
 
 enum WorkflowTestGroupKind {
@@ -164,8 +105,6 @@ model WorkflowTestRun {
   user            User                @relation(fields: [userId], references: [id], onDelete: Cascade)
   workflowTestId  String
   workflowTest    WorkflowTest        @relation(fields: [workflowTestId], references: [id], onDelete: Cascade)
-  agentProfileId  String?
-  agentProfile    AgentProfile?       @relation(fields: [agentProfileId], references: [id], onDelete: SetNull)
   agent           Json?
   testName        String
   dryRun          Boolean

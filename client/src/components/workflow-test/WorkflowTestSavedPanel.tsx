@@ -13,10 +13,8 @@ import {
   duplicateWorkflowTest,
   getWorkflowTest,
   getWorkflowTestRun,
-  listAgents,
   listWorkflowTests,
   type SavedWorkflowTest,
-  type UserAgent,
   type WorkflowTestCompletePayload,
   type WorkflowTestGroupRecord,
 } from "../../api";
@@ -120,7 +118,6 @@ export function WorkflowTestSavedPanel({
   onTestsLoaded,
 }: Props) {
   const [tests, setTests] = useState<SavedWorkflowTest[]>([]);
-  const [agents, setAgents] = useState<UserAgent[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
   const [expandedId, setExpandedId] = useState<string | null>(null);
@@ -130,7 +127,6 @@ export function WorkflowTestSavedPanel({
   const [deleting, setDeleting] = useState(false);
   const [loadingRunId, setLoadingRunId] = useState<string | null>(null);
   const [duplicateTarget, setDuplicateTarget] = useState<SavedWorkflowTest | null>(null);
-  const [duplicateAgentId, setDuplicateAgentId] = useState("");
   const [duplicateName, setDuplicateName] = useState("");
   const [duplicating, setDuplicating] = useState(false);
   const { run, runGroup, rerunFailuresInReport, running: runnerActive } =
@@ -139,12 +135,8 @@ export function WorkflowTestSavedPanel({
   const refresh = useCallback(async () => {
     setLoading(true);
     try {
-      const [list, agentList] = await Promise.all([
-        listWorkflowTests(),
-        listAgents().catch(() => ({ agents: [] as UserAgent[], activeAgentId: null })),
-      ]);
+      const list = await listWorkflowTests();
       setTests(list);
-      setAgents(agentList.agents);
       onTestsLoaded?.({
         testCount: list.length,
         runCount: list.reduce((sum, test) => sum + (test.runCount ?? 0), 0),
@@ -217,11 +209,6 @@ export function WorkflowTestSavedPanel({
   }
 
   async function handleRerun(test: SavedWorkflowTest) {
-    if (!test.agentProfileId) {
-      onError("Assign an agent to this saved test in Setup before running.");
-      return;
-    }
-
     const manualGroups = test.groups
       .filter((group) => group.kind === "manual")
       .map((group) => ({
@@ -234,8 +221,6 @@ export function WorkflowTestSavedPanel({
     await run({
       testName: test.name,
       groups: manualGroups,
-      agentProfileId: test.agentProfileId,
-      databaseConnectionId: test.databaseConnectionId,
       dryRun: test.dryRun,
       delayMs: test.delayMs,
     });
@@ -299,20 +284,15 @@ export function WorkflowTestSavedPanel({
   }
 
   function openDuplicateDialog(test: SavedWorkflowTest) {
-    const otherAgents = agents.filter((agent) => agent.id !== test.agentProfileId);
     setDuplicateTarget(test);
-    setDuplicateAgentId(otherAgents[0]?.id ?? "");
-    const baseName = test.name.split(" — ")[0] ?? test.name;
-    const agentName = otherAgents[0]?.name ?? "Agent";
-    setDuplicateName(`${baseName} — ${agentName}`);
+    setDuplicateName(`${test.name} copy`);
   }
 
   async function confirmDuplicate() {
-    if (!duplicateTarget || !duplicateAgentId) return;
+    if (!duplicateTarget) return;
     setDuplicating(true);
     try {
       await duplicateWorkflowTest(duplicateTarget.id, {
-        agentProfileId: duplicateAgentId,
         testName: duplicateName.trim() || undefined,
       });
       setDuplicateTarget(null);
@@ -351,8 +331,7 @@ export function WorkflowTestSavedPanel({
     const runs = detail?.runs ?? [];
     const failures = getFailuresGroup(test.groups);
     const failuresCount = failures?.queries.length ?? 0;
-    const canDuplicate = agents.some((agent) => agent.id !== test.agentProfileId);
-    const hasAgent = Boolean(test.agentProfileId);
+    const canDuplicate = true;
 
     return (
       <div
@@ -400,11 +379,6 @@ export function WorkflowTestSavedPanel({
                     Last: {formatSummary(summary)}
                   </span>
                 )}
-                {!hasAgent && (
-                  <span className="mt-1 block text-xs text-amber-700 dark:text-amber-400">
-                    No agent assigned — open in Setup and select an agent before running.
-                  </span>
-                )}
               </span>
             </button>
             <div className="flex flex-wrap gap-2">
@@ -412,7 +386,7 @@ export function WorkflowTestSavedPanel({
                 type="button"
                 size="sm"
                 variant="secondary"
-                disabled={disabled || runnerActive || !hasAgent}
+                disabled={disabled || runnerActive}
                 onClick={() => void handleRerun(test)}
               >
                 <RotateCcw className="h-3.5 w-3.5" />
@@ -423,7 +397,7 @@ export function WorkflowTestSavedPanel({
                   type="button"
                   size="sm"
                   variant="secondary"
-                  disabled={disabled || runnerActive || !hasAgent}
+                  disabled={disabled || runnerActive}
                   onClick={() => void handleRunFailures(test)}
                 >
                   Run failures
@@ -596,39 +570,14 @@ export function WorkflowTestSavedPanel({
       >
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Duplicate for another agent</DialogTitle>
+            <DialogTitle>Duplicate test</DialogTitle>
             <DialogDescription>
-              Copy this test&apos;s manual query groups into a new saved test pinned to a
-              different agent. The suite key is preserved for Compare.
+              Copy this test&apos;s manual query groups into a new saved test. The model and
+              database come from the environment.
             </DialogDescription>
           </DialogHeader>
           {duplicateTarget && (
             <div className="space-y-3">
-              <div>
-                <Label htmlFor="duplicate-agent">Agent</Label>
-                <select
-                  id="duplicate-agent"
-                  className="mt-1 flex h-10 w-full rounded-md border border-input bg-background px-3 text-sm"
-                  value={duplicateAgentId}
-                  onChange={(e) => {
-                    const agent = agents.find((item) => item.id === e.target.value);
-                    setDuplicateAgentId(e.target.value);
-                    if (agent) {
-                      const baseName =
-                        duplicateTarget.name.split(" — ")[0] ?? duplicateTarget.name;
-                      setDuplicateName(`${baseName} — ${agent.name}`);
-                    }
-                  }}
-                >
-                  {agents
-                    .filter((agent) => agent.id !== duplicateTarget.agentProfileId)
-                    .map((agent) => (
-                      <option key={agent.id} value={agent.id}>
-                        {agent.name} ({providerLabel(agent.llmProvider)})
-                      </option>
-                    ))}
-                </select>
-              </div>
               <div>
                 <Label htmlFor="duplicate-name">Test name</Label>
                 <Input
@@ -652,7 +601,7 @@ export function WorkflowTestSavedPanel({
             <Button
               type="button"
               loading={duplicating}
-              disabled={!duplicateAgentId}
+              disabled={!duplicateName.trim()}
               onClick={() => void confirmDuplicate()}
             >
               Duplicate

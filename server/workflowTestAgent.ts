@@ -1,10 +1,9 @@
 import type { AgentConfigOverrides } from "./agent.js";
 import {
-  profileAgentConfig,
   toAgentSnapshot,
   type AgentSnapshot,
 } from "./userAgent.js";
-import { prisma } from "./db.js";
+import { loadEnv } from "./env.js";
 
 export interface ResolvedWorkflowAgent {
   agent: {
@@ -20,21 +19,20 @@ export interface ResolvedWorkflowAgent {
   snapshot: AgentSnapshot;
 }
 
-export async function resolveWorkflowTestAgent(
-  userId: string,
-  agentProfileId?: string | null,
-): Promise<ResolvedWorkflowAgent | null> {
-  if (!agentProfileId) return null;
-
-  const agent = await prisma.agentProfile.findFirst({
-    where: { id: agentProfileId, userId },
-  });
-
-  if (!agent) return null;
-
+export async function resolveWorkflowTestAgent(): Promise<ResolvedWorkflowAgent> {
+  const env = loadEnv();
+  const agent = {
+    id: "env",
+    name: env.DB_AGENT_MODEL_NAME,
+    systemPrompt: null,
+    llmProvider: env.DB_AGENT_LLM_PROVIDER,
+    modelName: env.DB_AGENT_MODEL_NAME,
+    apiKey: null,
+    baseUrl: env.DB_AGENT_BASE_URL ?? null,
+  };
   return {
     agent,
-    runnerOptions: profileAgentConfig(agent),
+    runnerOptions: {},
     snapshot: toAgentSnapshot(agent),
   };
 }

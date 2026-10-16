@@ -49,6 +49,10 @@ const envSchema = z
     DB_AGENT_OLLAMA_BASE_URL: z.string().optional(),
     DB_AGENT_DB_TYPE: z.enum(["postgres", "mysql"]).optional(),
     DB_AGENT_DB_URI: z.string().optional(),
+    /** Domain definitions passed to the agent. Not stored in a table. */
+    DB_AGENT_BUSINESS_SUMMARY: z.string().optional(),
+    /** Minutes between schema rebuilds. 0 disables the timer. */
+    DB_AGENT_SCHEMA_REFRESH_MINUTES: z.coerce.number().default(0),
     /** Postgres schema used when fingerprinting golden tables. */
     TESTUI_GOLDEN_PG_SCHEMA: z.string().default("public"),
     /** Optional read-only URI for scoring fallback and fingerprints. */

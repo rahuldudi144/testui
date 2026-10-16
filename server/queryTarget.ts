@@ -1,4 +1,9 @@
-import { DatabaseAgent, fetchDatabaseSchema } from "../../index.js";
+import {
+  createSchemaContextCache,
+  DatabaseAgent,
+  prepareSchemaContext,
+  type SchemaContext,
+} from "../../index.js";
 import type {
   DatabaseMetadata,
   DatabaseType,
@@ -7,7 +12,18 @@ import type {
 import { loadEnv, resolveEnvApiKey } from "./env.js";
 import { parseDbHost } from "./userDatabase.js";
 
-let liveSchema: DatabaseMetadata | undefined;
+const schemaCache = createSchemaContextCache(async () => {
+  const env = loadEnv();
+  const uri = env.DB_AGENT_DB_URI?.trim() ?? "";
+  if (!uri) return undefined;
+  return prepareSchemaContext({
+    dbType: resolveDbType(uri, env.DB_AGENT_DB_TYPE),
+    dbUri: uri,
+    valueCatalog: { enabled: true, maxDistinct: 30, maxPromptTokens: 3000 },
+  });
+});
+
+let refreshTimer: ReturnType<typeof setInterval> | undefined;
 let agent: DatabaseAgent | undefined;
 
 export function chatHistoryLimit(): number {
@@ -29,24 +45,95 @@ function resolveDbType(uri: string, explicit: string | undefined): DatabaseType 
   return "postgres";
 }
 
-export function getLiveSchema(): DatabaseMetadata | undefined {
-  return liveSchema;
+export function getSchemaContext(): SchemaContext | undefined {
+  return schemaCache.current();
 }
 
-/** Fetch the query database schema once, the same way the main app does at startup. */
+export function getLiveSchema(): DatabaseMetadata | undefined {
+  return schemaCache.current()?.liveSchema;
+}
+
+export function schemaContextSummary() {
+  const ctx = schemaCache.current();
+  return {
+    schemaHash: ctx?.schemaHash ?? null,
+    tables: ctx?.stats.tables ?? 0,
+    enumColumns: ctx?.stats.enumColumns ?? 0,
+    builtAt: ctx?.builtAt ?? null,
+  };
+}
+
+function logSchemaReady(ctx: SchemaContext): void {
+  console.log(
+    `schema context ready: hash=${ctx.schemaHash} tables=${ctx.stats.tables} enumColumns=${ctx.stats.enumColumns}`,
+  );
+}
+
+function startRefreshTimer(): void {
+  const minutes = loadEnv().DB_AGENT_SCHEMA_REFRESH_MINUTES;
+  if (minutes <= 0 || refreshTimer) return;
+  refreshTimer = setInterval(() => {
+    void refreshQuerySchema().catch((error: unknown) => {
+      console.error("Schema context refresh failed", error);
+    });
+  }, minutes * 60_000);
+  refreshTimer.unref?.();
+}
+
+/** Rebuild the schema context and swap it in after success. */
+export async function refreshQuerySchema(): Promise<SchemaContext | undefined> {
+  const ctx = await schemaCache.refresh();
+  if (ctx) startRefreshTimer();
+  return ctx;
+}
+
+/** Single-flight load used when startup did not fill the cache. */
+export async function ensureQuerySchema(): Promise<SchemaContext | undefined> {
+  const uri = loadEnv().DB_AGENT_DB_URI?.trim() ?? "";
+  if (!uri) return undefined;
+  const existing = schemaCache.current();
+  if (existing) return existing;
+  try {
+    const ctx = await schemaCache.load();
+    if (ctx) logSchemaReady(ctx);
+    return ctx;
+  } catch (error) {
+    console.error("Schema context lazy load failed", error);
+    return undefined;
+  }
+}
+
+/**
+ * Load the schema context at startup.
+ * A failed database does not stop the server; the first request loads it once.
+ */
 export async function loadQuerySchema(): Promise<void> {
-  const env = loadEnv();
-  const uri = env.DB_AGENT_DB_URI?.trim() ?? "";
+  const uri = loadEnv().DB_AGENT_DB_URI?.trim() ?? "";
   if (!uri) {
-    liveSchema = undefined;
     console.log("Query schema load skipped; DB_AGENT_DB_URI is not set");
     return;
   }
 
-  const dbType = resolveDbType(uri, env.DB_AGENT_DB_TYPE);
-  liveSchema = await fetchDatabaseSchema(dbType, uri);
-  const tableCount = Object.keys(liveSchema.tables ?? {}).length;
-  console.log(`Query schema loaded — ${tableCount} table(s), ${dbType}`);
+  const delays = [0, 500, 1500];
+  let lastError: unknown;
+  for (const delay of delays) {
+    if (delay > 0) {
+      await new Promise((resolve) => setTimeout(resolve, delay));
+    }
+    try {
+      const ctx = await refreshQuerySchema();
+      if (!ctx) return;
+      logSchemaReady(ctx);
+      return;
+    } catch (error) {
+      lastError = error;
+      console.error("Schema context load failed", error);
+    }
+  }
+  console.error(
+    "Schema context unavailable after retries; will try again on first use",
+    lastError,
+  );
 }
 
 export interface QueryTarget {
@@ -57,7 +144,7 @@ export interface QueryTarget {
   host: string;
   knowledgeDbUri: null;
   dbMetadata: DatabaseMetadata | undefined;
-  businessContext: null;
+  businessContext: string | null;
 }
 
 export function getQueryTarget(): QueryTarget | null {
@@ -72,8 +159,8 @@ export function getQueryTarget(): QueryTarget | null {
     dbUri,
     host: parseDbHost(dbUri),
     knowledgeDbUri: null,
-    dbMetadata: liveSchema,
-    businessContext: null,
+    dbMetadata: getLiveSchema(),
+    businessContext: loadEnv().DB_AGENT_BUSINESS_SUMMARY?.trim() || null,
   };
 }
 
@@ -87,6 +174,7 @@ export function envQuerySetup() {
       dbType: activeDb.dbType,
       name: activeDb.name,
       host: activeDb.host,
+      ...schemaContextSummary(),
     },
     agentConfig: {
       provider: env.DB_AGENT_LLM_PROVIDER,
@@ -109,11 +197,6 @@ export function requireQueryTarget(): QueryTarget {
   if (!target) {
     throw new Error(
       "DB_AGENT_DB_URI is not set. Set it in backend/.env and restart.",
-    );
-  }
-  if (!liveSchema) {
-    throw new Error(
-      "The query schema is not loaded. Check DB_AGENT_DB_URI and restart.",
     );
   }
   return target;
